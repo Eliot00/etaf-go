@@ -1,0 +1,475 @@
+;;; etaf-go-view-test.el --- Board artwork and UI event tests -*- lexical-binding: t -*-
+
+;;; Code:
+(require 'ert)
+(require 'cl-lib)
+(require 'etaf-go)
+
+(defun etaf-go-test--press (runtime reference)
+  "Invoke REFERENCE's committed press handler in RUNTIME."
+  (let ((handler (plist-get (etaf-runtime-host-props-for runtime reference)
+                            :on-press)))
+    (should handler)
+    (etaf-call-with-batch (lambda () (funcall handler)))
+    (etaf-runtime-flush runtime)))
+
+(defun etaf-go-test--text (buffer)
+  "Return BUFFER's visible text."
+  (with-current-buffer buffer
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun etaf-go-test--count (buffer character)
+  "Count CHARACTER in BUFFER."
+  (with-current-buffer buffer
+    (cl-count character (buffer-string))))
+
+(ert-deftest etaf-go-view-svg-cells ()
+  "Cell artwork builds valid SVG descriptors."
+  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+         (size 9)
+         (position (etaf-go--position size root (list root)))
+         (marks (etaf-go--node-marks root size))
+         (metrics (list :columns 2 :lines 1 :width 16 :height 17 :graphic t))
+         (cache (cons (make-hash-table :test #'equal)
+                      (make-hash-table :test #'equal)))
+         (art (etaf-go--intersection-art cache etaf-go--light-theme metrics
+                                         size 5 5 position marks t nil nil))
+         (margin (etaf-go--margin-art cache etaf-go--light-theme metrics
+                                      size 0 3 nil)))
+    (should (eq (car art) 'image))
+    (should (eq (plist-get (cdr art) :type) 'svg))
+    (should (stringp (plist-get (cdr art) :data)))
+    (should (eq (car margin) 'image))
+    (should (= (hash-table-count (car cache)) 2))))
+
+(ert-deftest etaf-go-view-board-metrics-uses-display-metrics ()
+  "Board metrics use the runtime's font metrics and viewport."
+  (let ((etaf-go-cell-lines 'auto))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'etaf-display-metrics)
+               (lambda (&optional _)
+                 '(:char-width 12 :line-height 27 :ascent 80)))
+              ((symbol-function 'etaf-viewport)
+               (lambda (&optional _) (cons 1440 50))))
+      (let ((cell (etaf-go--board-metrics 9)))
+        (should (= (plist-get cell :lines) 3))
+        (should (= (plist-get cell :columns) 7))
+        (should (= (plist-get cell :width) 84))
+        (should (= (plist-get cell :height) 81))
+        (should (= (plist-get cell :char-width) 12))
+        (should (plist-get cell :graphic))))))
+
+(ert-deftest etaf-go-view-cell-aspect-selection ()
+  "Cell selection prefers a near-square cell within the window."
+  (let ((cell (etaf-go--best-cell 12 27 4 10)))
+    (should (= (plist-get cell :lines) 3))
+    (should (= (plist-get cell :columns) 7))
+    (should (= (plist-get cell :width) 84))
+    (should (= (plist-get cell :height) 81)))
+  (let ((cell (etaf-go--best-cell 12 30 4 10)))
+    (should (= (plist-get cell :lines) 2))
+    (should (= (plist-get cell :columns) 5)))
+  (let ((cell (etaf-go--best-cell 10 20 4 10)))
+    (should (= (plist-get cell :lines) 1))
+    (should (= (plist-get cell :columns) 2)))
+  (let ((cell (etaf-go--best-cell 12 27 1 10)))
+    (should (= (plist-get cell :lines) 1))
+    (should (= (plist-get cell :columns) 2)))
+  (let ((cell (etaf-go--best-cell 12 27 4 3)))
+    (should (= (plist-get cell :lines) 1))
+    (should (= (plist-get cell :columns) 2))))
+
+(ert-deftest etaf-go-view-svg-resolves-palette-handle ()
+  "A reactive palette handle still paints the board instead of black."
+  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+         (size 9)
+         (position (etaf-go--position size root (list root)))
+         (marks (etaf-go--node-marks root size))
+         (metrics (list :columns 2 :lines 1 :width 16 :height 17 :graphic t))
+         (cache (cons (make-hash-table :test #'equal)
+                      (make-hash-table :test #'equal))))
+    (dolist (palette (list (etaf-ref etaf-go--light-theme)
+                           (etaf-computed (lambda () etaf-go--light-theme))))
+      (let* ((art (etaf-go--intersection-art cache palette metrics
+                                             size 5 5 position marks t nil nil))
+             (margin (etaf-go--margin-art cache palette metrics size 0 3 nil))
+             (data (plist-get (cdr art) :data))
+             (margin-data (plist-get (cdr margin) :data)))
+        (should (string-match-p "#E6C58B" data))
+        (should (string-match-p "#6A4A24" data))
+        (should (string-match-p "#DDB87A" margin-data))))))
+
+(ert-deftest etaf-go-view-all-19x19-cells ()
+  "Every cell of a 19x19 board produces artwork without an error."
+  (let* ((root (etaf-go--sgf-parse "(;GM[1]SZ[19]AB[dd][pp]TR[dd])"))
+         (size 19)
+         (position (etaf-go--position size root (list root)))
+         (marks (etaf-go--node-marks root size))
+         (metrics (list :columns 2 :lines 1 :width 16 :height 17 :graphic t))
+         (cache (cons (make-hash-table :test #'equal)
+                      (make-hash-table :test #'equal)))
+         (count 0))
+    (dotimes (row (+ size 2))
+      (dotimes (column (+ size 2))
+        (if (etaf-go--grid-point row column size)
+            (etaf-go--intersection-art cache etaf-go--dark-theme metrics
+                                       size row column position marks t nil nil)
+          (etaf-go--margin-art cache etaf-go--dark-theme metrics
+                               size row column nil))
+        (cl-incf count)))
+    (should (= count (* (+ size 2) (+ size 2))))
+    (should (= (hash-table-count (car cache)) (* (+ size 2) (+ size 2))))))
+
+(ert-deftest etaf-go-view-app-clears-global-line-spacing ()
+  "The application buffer ignores a global `line-spacing'."
+  (let ((previous (default-value 'line-spacing)))
+    (unwind-protect
+        (progn
+          (setq-default line-spacing 0.1)
+          (cl-letf (((symbol-function 'display-graphic-p)
+                     (lambda (&rest _) nil)))
+            (let ((buffer (etaf-go-demo)))
+              (unwind-protect
+                  (should (null (buffer-local-value 'line-spacing buffer)))
+                (when (and (buffer-live-p buffer)
+                           (etaf-go--session-p (etaf-app-state buffer)))
+                  (etaf-go-close buffer))))))
+      (setq-default line-spacing previous))))
+
+(ert-deftest etaf-go-view-practice-and-study ()
+  "Practice, hint, undo, mode switching, study moves and passing work."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-demo))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            ;; A wrong practice move is refused without changing the board.
+            (etaf-go-test--press runtime 'go-cell-2-2)
+            (should (= (etaf-go-test--count buffer ?●) 3))
+            (should (= (etaf-go-test--count buffer ?○) 1))
+            (should (string-match-p "不是正解" (etaf-go-test--text buffer)))
+            ;; The solution captures the white stone.
+            (etaf-go-test--press runtime 'go-cell-6-5)
+            (should (= (etaf-go-test--count buffer ?●) 4))
+            (should (= (etaf-go-test--count buffer ?○) 0))
+            (should (string-match-p "正解完成" (etaf-go-test--text buffer)))
+            (should (string-match-p "提子成功" (etaf-go-test--text buffer)))
+            ;; Undo, then let the hint play the solution.
+            (etaf-go-test--press runtime 'go-prev)
+            (should (= (etaf-go-test--count buffer ?●) 3))
+            (should (= (etaf-go-test--count buffer ?○) 1))
+            (etaf-go-test--press runtime 'go-hint)
+            (should (= (etaf-go-test--count buffer ?●) 4))
+            (should (= (etaf-go-test--count buffer ?○) 0))
+            (etaf-go-test--press runtime 'go-start)
+            (should (= (etaf-go-test--count buffer ?●) 3))
+            (should (= (etaf-go-test--count buffer ?○) 1))
+            ;; Practice -> study; play a free move that joins the record.
+            (etaf-go-test--press runtime 'go-mode)
+            (should (string-match-p "模式·研究" (etaf-go-test--text buffer)))
+            (etaf-go-test--press runtime 'go-cell-2-2)
+            (should (= (etaf-go-test--count buffer ?●) 4))
+            (should (string-match-p "已写入棋谱" (etaf-go-test--text buffer)))
+            (etaf-go-test--press runtime 'go-prev)
+            (should (= (etaf-go-test--count buffer ?●) 3))
+            ;; Pass in study records a pass node, then undo removes it.
+            (etaf-go-test--press runtime 'go-pass)
+            (should (string-match-p "黑 停一手（已写入棋谱"
+                                    (etaf-go-test--text buffer)))
+            (etaf-go-test--press runtime 'go-prev)
+            (should-not (string-match-p "黑 停一手（已写入棋谱"
+                                        (etaf-go-test--text buffer)))
+            ;; Display toggles keep the position.
+            (etaf-go-test--press runtime 'go-theme)
+            (etaf-go-test--press runtime 'go-numbers)
+            (should (= (etaf-go-test--count buffer ?●) 3)))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-study-branch-persists-and-saves ()
+  "Study moves stay in the tree, survive saving and reopen identically."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((directory (make-temp-file "etaf-go-test" t))
+           (file (expand-file-name "study.sgf" directory))
+           (buffer nil))
+      (unwind-protect
+          (progn
+            (write-region etaf-go--demo-sgf nil file nil 'silent)
+            (setq buffer (etaf-go-open file))
+            (let ((runtime (etaf-runtime-for-buffer buffer)))
+              ;; Replay -> practice -> study, then play a recorded branch move.
+              (etaf-go-test--press runtime 'go-mode)
+              (etaf-go-test--press runtime 'go-mode)
+              (etaf-go-test--press runtime 'go-cell-2-2)
+              (should (string-match-p "已写入棋谱"
+                                      (etaf-go-test--text buffer)))
+              ;; The tree keeps the new variation next to the record line.
+              (let* ((session (etaf-app-state buffer))
+                     (root (etaf-go--session-root session)))
+                (should (= (length (etaf-go--node-children root)) 2))
+                (should (equal (etaf-go--prop1
+                                (nth 1 (etaf-go--node-children root)) "B")
+                               "bb")))
+              ;; The board still shows the study stone after navigating away.
+              (etaf-go-test--press runtime 'go-start)
+              (etaf-go-test--press runtime 'go-next)
+              (should (= (etaf-go-test--count buffer ?●) 4))
+              ;; Saving writes the branch; the marker round-trips.
+              (etaf-go-test--press runtime 'go-save)
+              (let ((text (with-temp-buffer
+                            (insert-file-contents file)
+                            (buffer-string))))
+                (should (string-match-p "EG\\[1\\]" text))
+                (should (string-match-p "B\\[bb\\]" text)))
+              ;; A fresh session of the saved file replays the branch.
+              (etaf-go-close buffer)
+              (setq buffer (etaf-go-open file)
+                    runtime (etaf-runtime-for-buffer buffer))
+              (etaf-go-test--press runtime 'go-mode)
+              (etaf-go-test--press runtime 'go-mode)
+              (should (= (length (etaf-go--node-children
+                                  (etaf-go--session-root
+                                   (etaf-app-state buffer))))
+                         2))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))
+        (delete-directory directory t)))))
+
+(ert-deftest etaf-go-view-study-does-not-become-a-solution ()
+  "Practice ignores branches added by study mode."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-demo))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            ;; Study a move, return to the start, then back to practice.
+            (etaf-go-test--press runtime 'go-mode)
+            (etaf-go-test--press runtime 'go-cell-2-2)
+            (etaf-go-test--press runtime 'go-start)
+            (etaf-go-test--press runtime 'go-mode)
+            (etaf-go-test--press runtime 'go-mode)
+            (should (string-match-p "模式·死活" (etaf-go-test--text buffer)))
+            ;; The studied point is still not the answer.
+            (etaf-go-test--press runtime 'go-cell-2-2)
+            (should (string-match-p "不是正解" (etaf-go-test--text buffer)))
+            ;; The recorded solution still solves the problem.
+            (etaf-go-test--press runtime 'go-cell-6-5)
+            (should (string-match-p "正解" (etaf-go-test--text buffer))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-comment-editing ()
+  "The comment dialog opens, submits and closes from the buttons."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-demo))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-comment)
+            (should (string-match-p "编辑注释" (etaf-go-test--text buffer)))
+            (etaf-go-test--press runtime 'go-comment-save)
+            (should (string-match-p "注释已保存到当前节点"
+                                    (etaf-go-test--text buffer)))
+            (should-not (string-match-p "编辑注释"
+                                        (etaf-go-test--text buffer))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-comment-submit-writes-node ()
+  "Submitting the editor writes or removes the current node's comment."
+  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+         (path (etaf-ref (list root)))
+         (open (etaf-ref t))
+         (draft (etaf-ref "试一下注释"))
+         (dirty (etaf-ref nil))
+         (hint (etaf-ref nil)))
+    (etaf-go--submit-comment path open draft dirty hint root)
+    (should (equal (etaf-go--prop1 root "C") "试一下注释"))
+    (should (etaf-value dirty))
+    (should-not (etaf-value open))
+    ;; An empty draft removes the comment again.
+    (setf (etaf-value draft) "")
+    (etaf-go--submit-comment path open draft dirty hint root)
+    (should (null (etaf-go--prop1 root "C")))))
+
+(ert-deftest etaf-go-view-delete-branch ()
+  "Deleting a branch removes its node and marks the session dirty."
+  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+         (mode (etaf-ref 'study))
+         (path (etaf-ref (list root)))
+         (dirty (etaf-ref nil))
+         (hint (etaf-ref nil))
+         (position (etaf-ref (etaf-go--position 9 root (list root)))))
+    (cl-letf (((symbol-function 'etaf-confirm-dialog) (lambda (_) t)))
+      (etaf-go--study-play path dirty hint position 9 (+ (* 1 9) 1))
+      (should (= (length (etaf-go--node-children root)) 2))
+      (should (etaf-value dirty))
+      (etaf-go--delete-branch mode path dirty hint)
+      (should (= (length (etaf-go--node-children root)) 1))
+      (should (equal (etaf-value path) (list root)))
+      (should (string-match-p "分支已删除" (etaf-value hint))))))
+
+(ert-deftest etaf-go-view-maybe-close-confirms-dirty ()
+  "Closing a dirty session asks first and keeps the buffer on decline."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
+            ((symbol-function 'etaf-confirm-dialog) (lambda (_) nil)))
+    (let ((buffer (etaf-go-demo)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (etaf-go--maybe-close (etaf-ref t)))
+            (should (buffer-live-p buffer))
+            (cl-letf (((symbol-function 'etaf-confirm-dialog)
+                       (lambda (_) t)))
+              (with-current-buffer buffer
+                (etaf-go--maybe-close (etaf-ref t))))
+            (should-not (buffer-live-p buffer)))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-territory-art ()
+  "An empty point owned by black paints territory in the SVG cell."
+  (let* ((root (etaf-go--sgf-parse "(;GM[1]SZ[3]AB[aa][ab])"))
+         (position (etaf-go--position 3 root (list root)))
+         (territory (etaf-go--territory (plist-get position :board) 3))
+         (metrics (list :columns 2 :lines 1 :width 16 :height 17 :graphic t))
+         (cache (cons (make-hash-table :test #'equal)
+                      (make-hash-table :test #'equal)))
+         (art (etaf-go--intersection-art cache etaf-go--dark-theme metrics
+                                         3 3 3 position nil nil territory nil))
+         (data (plist-get (cdr art) :data)))
+    (should (eq (car art) 'image))
+    (should (string-match-p "#14161A" data))))
+
+(ert-deftest etaf-go-view-edit-mode-authoring ()
+  "Edit mode writes setup stones, marks and the player into the node."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-demo))
+           (runtime (etaf-runtime-for-buffer buffer))
+           (root (etaf-go--session-root (etaf-app-state buffer))))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-edit)
+            (should (string-match-p "模式·编辑" (etaf-go-test--text buffer)))
+            ;; A black setup stone appears and is written as AB.
+            (etaf-go-test--press runtime 'go-tool-black)
+            (etaf-go-test--press runtime 'go-cell-1-1)
+            (should (= (etaf-go-test--count buffer ?●) 4))
+            (should (member "aa" (etaf-go--prop root "AB")))
+            ;; White replaces the same point instead of stacking.
+            (etaf-go-test--press runtime 'go-tool-white)
+            (etaf-go-test--press runtime 'go-cell-1-1)
+            (should (= (etaf-go-test--count buffer ?●) 3))
+            (should (= (etaf-go-test--count buffer ?○) 2))
+            (should-not (member "aa" (etaf-go--prop root "AB")))
+            (should (member "aa" (etaf-go--prop root "AW")))
+            ;; Erase records AE on the current node.
+            (etaf-go-test--press runtime 'go-tool-erase)
+            (etaf-go-test--press runtime 'go-cell-1-1)
+            (should (= (etaf-go-test--count buffer ?○) 1))
+            (should (member "aa" (etaf-go--prop root "AE")))
+            ;; Marks and the player are written too.
+            (etaf-go-test--press runtime 'go-tool-triangle)
+            (etaf-go-test--press runtime 'go-cell-2-2)
+            (should (member "bb" (etaf-go--prop root "TR")))
+            (etaf-go-test--press runtime 'go-player)
+            (should (equal (etaf-go--prop1 root "PL") "B"))
+            (etaf-go-test--press runtime 'go-player)
+            (should (equal (etaf-go--prop1 root "PL") "W"))
+            ;; The score overlay reports its area summary.
+            (etaf-go-test--press runtime 'go-score)
+            (should (string-match-p "数子 黑3 白1" (etaf-go-test--text buffer))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-edit-skips-move-nodes ()
+  "Editing a node that holds a move explains where to edit instead."
+  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+         (move (car (etaf-go--node-children root)))
+         (path (etaf-ref (list root move)))
+         (dirty (etaf-ref nil))
+         (hint (etaf-ref nil))
+         (tool (etaf-ref 'black)))
+    (etaf-go--edit-point tool path dirty hint 9 move (+ (* 1 9) 1))
+    (should-not (etaf-value dirty))
+    (should (string-match-p "回到开局" (etaf-value hint)))))
+
+(ert-deftest etaf-go-view-edit-label ()
+  "Labels are set, replaced and removed on the current node."
+  (let ((node (etaf-go--sgf-parse "(;GM[1]SZ[9])")))
+    (etaf-go--edit-label node 9 0 "A")
+    (should (equal (etaf-go--prop node "LB") '("aa:A")))
+    (etaf-go--edit-label node 9 0 "B")
+    (should (equal (etaf-go--prop node "LB") '("aa:B")))
+    (etaf-go--edit-label node 9 0 "")
+    (should-not (etaf-go--prop node "LB"))))
+
+(ert-deftest etaf-go-view-new-record-starts-in-edit-mode ()
+  "A new record opens an empty board ready for setup."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let ((buffer (etaf-go-new 9)))
+      (unwind-protect
+          (progn
+            (let ((session (etaf-app-state buffer)))
+              (should (= (etaf-go--session-size session) 9))
+              (should (eq (etaf-go--session-mode session) 'edit))
+              (should (equal (etaf-go--prop1
+                              (etaf-go--session-root session) "SZ")
+                             "9")))
+            (should (string-match-p "模式·编辑" (etaf-go-test--text buffer)))
+            (should (= (etaf-go-test--count buffer ?●) 0)))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-edit-saves-and-reopens ()
+  "A problem authored in edit mode saves and reads back."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((directory (make-temp-file "etaf-go-edit" t))
+           (file (expand-file-name "problem.sgf" directory))
+           (buffer nil))
+      (unwind-protect
+          (progn
+            (setq buffer (etaf-go-new 9))
+            (let ((runtime (etaf-runtime-for-buffer buffer)))
+              (etaf-go-test--press runtime 'go-tool-black)
+              (etaf-go-test--press runtime 'go-cell-3-3)
+              (etaf-go-test--press runtime 'go-tool-triangle)
+              (etaf-go-test--press runtime 'go-cell-3-4)
+              (etaf-go-test--press runtime 'go-player)
+              (cl-letf (((symbol-function 'etaf-call-with-input)
+                         (lambda (reader) (funcall reader)))
+                        ((symbol-function 'read-file-name)
+                         (lambda (&rest _) file)))
+                (etaf-go-test--press runtime 'go-save)))
+            (should (file-exists-p file))
+            (let ((text (with-temp-buffer
+                          (insert-file-contents file)
+                          (buffer-string))))
+              (should (string-match-p "SZ\\[9\\]" text))
+              (should (string-match-p "AB\\[cc\\]" text))
+              (should (string-match-p "TR\\[dc\\]" text))
+              (should (string-match-p "PL\\[W\\]" text)))
+            (etaf-go-close buffer)
+            (setq buffer (etaf-go-open file))
+            (let* ((session (etaf-app-state buffer))
+                   (root (etaf-go--session-root session))
+                   (board (plist-get (etaf-go--position 9 root (list root))
+                                     :board)))
+              (should (= (etaf-go--session-size session) 9))
+              (should (= (aref board (+ (* 2 9) 2)) etaf-go--black))
+              (should (= (aref board (+ (* 2 9) 3)) 0))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))
+        (delete-directory directory t)))))
+
+(provide 'etaf-go-view-test)
+;;; etaf-go-view-test.el ends here

@@ -1,0 +1,105 @@
+;;; etaf-go-rules-test.el --- Rule engine tests -*- lexical-binding: t -*-
+
+;;; Code:
+(require 'ert)
+(require 'cl-lib)
+(require 'etaf-go)
+
+(ert-deftest etaf-go-rules-capture-one-stone ()
+  "A surrounded stone is removed and the capturing stone stays."
+  (let* ((board (make-vector 9 0))
+         (size 3))
+    (aset board 4 etaf-go--white)
+    (aset board 1 etaf-go--black)
+    (aset board 3 etaf-go--black)
+    (aset board 5 etaf-go--black)
+    (let ((result (etaf-go--play board size etaf-go--black 7 nil)))
+      (should (plist-get result :ok))
+      (should (equal (plist-get result :captured) '(4)))
+      (should (= (aref (plist-get result :board) 4) 0))
+      (should (= (aref (plist-get result :board) 7) etaf-go--black))
+      (should-not (plist-get result :ko)))))
+
+(ert-deftest etaf-go-rules-refuses-occupied-and-suicide ()
+  "Occupied points and suicide are refused."
+  (let ((board (make-vector 9 0))
+        (size 3))
+    (aset board 4 etaf-go--black)
+    (should-not (plist-get (etaf-go--play board size etaf-go--white 4 nil) :ok))
+    (let ((empty (make-vector 9 0)))
+      (dolist (point '(1 3 5 7))
+        (aset empty point etaf-go--white))
+      (let ((result (etaf-go--play empty size etaf-go--black 4 nil)))
+        (should-not (plist-get result :ok))
+        (should (equal (plist-get result :reason) "禁着点：不能自杀"))))))
+
+(ert-deftest etaf-go-rules-simple-ko-point ()
+  "A one-stone capture with one liberty records the ko point."
+  (let ((board (make-vector 25 0)))
+    ;; White at (1,1); black at (0,1) (1,0) (2,1); white at (0,2) (2,2)
+    ;; and (1,3).  Black captures at (1,2) and the new stone has exactly one
+    ;; liberty, the captured point.
+    (aset board 6 etaf-go--white)
+    (dolist (point '(1 5 11))
+      (aset board point etaf-go--black))
+    (dolist (point '(2 8 12))
+      (aset board point etaf-go--white))
+    (let ((result (etaf-go--play board 5 etaf-go--black 7 nil)))
+      (should (plist-get result :ok))
+      (should (equal (plist-get result :captured) '(6)))
+      (should (= (plist-get result :ko) 6)))))
+
+(ert-deftest etaf-go-rules-ko-is-forbidden-next-turn ()
+  "Playing on the ko point immediately is refused."
+  (let ((board (make-vector 25 0)))
+    (aset board 6 etaf-go--white)
+    (dolist (point '(1 5 11))
+      (aset board point etaf-go--black))
+    (dolist (point '(2 8 12))
+      (aset board point etaf-go--white))
+    (let* ((result (etaf-go--play board 5 etaf-go--black 7 nil))
+           (next (etaf-go--play (plist-get result :board) 5 etaf-go--white
+                                (plist-get result :ko) (plist-get result :ko))))
+      (should-not (plist-get next :ok))
+      (should (string-match-p "打劫" (plist-get next :reason))))))
+
+(ert-deftest etaf-go-rules-territory-and-score ()
+  "Empty regions owned by one color become area; mixed regions stay neutral."
+  (let ((board (make-vector 9 0)))
+    (aset board 1 etaf-go--black)
+    (aset board 3 etaf-go--black)
+    (let* ((owner (etaf-go--territory board 3))
+           (score (etaf-go--score board 3 0.5)))
+      (should (= (aref owner 0) etaf-go--black))
+      (should (= (aref owner 8) etaf-go--black))
+      (should (= (plist-get score :black) 9))
+      (should (= (plist-get score :white) 0))
+      (should (= (plist-get score :margin) 8.5))))
+  (let ((board (make-vector 9 0)))
+    (aset board 0 etaf-go--black)
+    (aset board 8 etaf-go--white)
+    (let ((score (etaf-go--score board 3 0)))
+      (should (= (plist-get score :black) 1))
+      (should (= (plist-get score :white) 1))
+      (should (= (plist-get score :neutral) 7))
+      (should (= (plist-get score :margin) 0))))
+  (let ((score (etaf-go--score (make-vector 9 0) 3 6.5)))
+    (should (= (plist-get score :neutral) 9))
+    (should (= (plist-get score :margin) -6.5))))
+
+(ert-deftest etaf-go-rules-captures-feed-area-score ()
+  "Captured stones leave the board, so area scoring counts the captures."
+  (let* ((board (make-vector 9 0))
+         (size 3))
+    (aset board 4 etaf-go--white)
+    (dolist (point '(1 3 5))
+      (aset board point etaf-go--black))
+    (let* ((result (etaf-go--play board size etaf-go--black 7 nil))
+           (score (etaf-go--score (plist-get result :board) size 0)))
+      (should (plist-get result :ok))
+      (should (= (plist-get score :black) 9))
+      (should (= (plist-get score :white) 0))
+      (should (= (plist-get score :neutral) 0)))))
+
+(provide 'etaf-go-rules-test)
+;;; etaf-go-rules-test.el ends here
