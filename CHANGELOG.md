@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- The graphical board now takes the largest near-square cell that fits the
+  window instead of the smallest one, so it no longer sits at roughly half the
+  frame size.  Cell selection reacts to frame resizes.
+- Removed the blank line between the board column's rows and moved game info
+  into the side panel, leaving height for the larger board.
+- On frames where the side panel would force a smaller board, the panel moves
+  below the board instead; the board keeps its size.
+
 ## 0.2.0
 
 - Edit mode: set up black/white stones, erase, add triangle/square/circle/cross

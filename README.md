@@ -13,7 +13,7 @@
 - 新建棋谱：从空棋盘摆题，保存成自己的死活题或棋谱，不再依赖外部编辑器。
 - 形势判断：按中国数子法标出双方地盘并给出目差，可随时开关。
 - 图形端用 SVG 画棋子/棋盘/坐标/地盘，终端端用 box-drawing 字符和底色回退。
-- 图形端按实际字体度量自动选择接近正方形的 cell；`etaf-go-cell-lines` 可强制 cell 行数（`auto` 或 1–6），值越大棋盘越方也越高，窗口放不下时会滚动。
+- 图形端按实际字体度量自动选择**尽可能大**的接近正方形的 cell；窗口不够宽时侧栏自动移到棋盘下方，优先保证棋盘尺寸。`etaf-go-cell-lines` 可强制 cell 行数（`auto` 或 1–8），值越大棋盘越大，窗口放不下时会滚动。
 - 亮色/暗色棋盘，9/13/19 路及 2–25 路棋盘。
 - 走法列表可点击跳转，注释面板随当前节点更新。
 
@@ -34,14 +34,12 @@
 
 ## 安装
 
-把 `YOUR-NAME` 换成你的 GitHub 用户名后发布。
-
 ### package-vc
 
 ```elisp
 (package-vc-install
  '(etaf-go
-   :url "https://github.com/YOUR-NAME/etaf-go"))
+   :url "https://github.com/Eliot00/etaf-go"))
 ```
 
 ### use-package :vc
@@ -50,9 +48,10 @@
 
 ```elisp
 (use-package etaf-go
-  :vc (:url "https://github.com/YOUR-NAME/etaf-go"
+  :vc (:url "https://github.com/Eliot00/etaf-go"
        :rev :newest)
-  :commands (etaf-go-open etaf-go-problems etaf-go-demo etaf-go-close))
+  :commands (etaf-go-open etaf-go-new etaf-go-problems
+             etaf-go-demo etaf-go-close))
 ```
 
 入口和所有模块都在仓库根目录，`package-vc` 会把它们一起编译并生成 autoload，
@@ -65,7 +64,8 @@
 ```elisp
 (use-package etaf-go
   :load-path "/absolute/path/to/etaf-go"
-  :commands (etaf-go-open etaf-go-problems etaf-go-demo etaf-go-close))
+  :commands (etaf-go-open etaf-go-new etaf-go-problems
+             etaf-go-demo etaf-go-close))
 ```
 
 注意 `:load-path` 要写**绝对路径**（`~` 不会被 `require` 展开）。

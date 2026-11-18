@@ -67,56 +67,68 @@
   (etaf-theme-token token (plist-get etaf-go--light-theme token)))
 
 (defun etaf-go--best-cell (char-width line-height max-lines max-columns)
-  "Choose graphical cell COLUMNS and LINES closest to square.
-CHAR-WIDTH and LINE-HEIGHT are pixels.  MAX-LINES and MAX-COLUMNS bound
-the search.  Prefer the fewest lines that get within five percent of a
-square; otherwise return the closest feasible pair."
-  (let (good any)
-    (dolist (lines (number-sequence 1 (max 1 max-lines)))
-      (let* ((target (/ (* lines line-height) (float char-width)))
-             (columns (max 1 (round target)))
-             (width (* columns char-width))
-             (height (* lines line-height))
-             (error (abs (- (/ (float width) height) 1.0))))
-        (when (<= columns (max 1 max-columns))
-          (when (or (null any)
-                    (< error (nth 2 any))
-                    (and (= error (nth 2 any)) (< lines (car any))))
-            (setq any (list lines columns error)))
-          (when (and (<= error 0.05)
-                     (or (null good) (< lines (car good))))
-            (setq good (list lines columns error))))))
-    (let* ((choice (or good any (list 1 1 1.0)))
+  "Choose the largest near-square cell within LINES and COLUMNS bounds.
+CHAR-WIDTH and LINE-HEIGHT are pixels.  More lines make the board
+larger, so return the most lines whose rounded columns still fit."
+  (let (best)
+    (dotimes (index (max 1 max-lines))
+      (let* ((lines (1+ index))
+             (columns (max 1 (round (/ (* lines line-height)
+                                       (float char-width))))))
+        (when (and (<= columns (max 1 max-columns))
+                   (or (null best) (> lines (car best))))
+          (setq best (list lines columns)))))
+    (let* ((choice (or best (list 1 1)))
            (lines (nth 0 choice))
            (columns (nth 1 choice)))
       (list :columns columns :lines lines
             :width (* columns char-width)
             :height (* lines line-height)))))
 
+(defconst etaf-go--row-layout-columns 86
+  "Minimum window width in character columns for a side-by-side layout.")
+
 (defun etaf-go--board-metrics (size)
-  "Choose a near-square cell for a SIZE board in the current window."
+  "Choose the largest near-square cell for a SIZE board.
+The board takes the window height left after the controls and the
+width left after the side panel, so it grows with the frame instead of
+staying at the smallest square cell."
   (if (and (display-graphic-p) (image-type-available-p 'svg))
       (let* ((display (etaf-display-metrics))
              (char-width (max 1 (plist-get display :char-width)))
              (line-height (max 1 (plist-get display :line-height)))
              (viewport (etaf-viewport))
-             (rows (1+ size))
+             (window-rows (or (cdr viewport) 40))
+             (window-columns (floor (or (car viewport)
+                                        (* 80 char-width))
+                                    char-width))
+             (grid (+ size 2))
              (forced (bound-and-true-p etaf-go-cell-lines))
              (max-lines
               (if (integerp forced)
-                  (max 1 (min 6 forced))
-                (let ((window-rows (or (cdr viewport) 40)))
-                  (max 1 (min 4 (floor (max 0 (- window-rows 12)) rows))))))
-             (max-columns
+                  (max 1 (min 8 forced))
+                (max 1 (floor (max 0 (- window-rows 8)) grid))))
+             (row-columns
               (if (integerp forced)
                   30
-                (let* ((window-pixels (or (car viewport)
-                                          (* 80 char-width)))
-                       (window-columns (floor window-pixels char-width)))
-                  (max 2 (floor (max 0 (- window-columns 6)) rows))))))
-        (append (etaf-go--best-cell char-width line-height
-                                    max-lines max-columns)
-                (list :char-width char-width :graphic t)))
+                (max 1 (floor (max 0 (- window-columns 42)) grid))))
+             (stack-columns
+              (if (integerp forced)
+                  30
+                (max 1 (floor (max 0 (- window-columns 4)) grid))))
+             (row-cell (etaf-go--best-cell char-width line-height
+                                           max-lines row-columns))
+             (stack-cell (etaf-go--best-cell char-width line-height
+                                             max-lines stack-columns))
+             (stacked (or (> (plist-get stack-cell :lines)
+                             (plist-get row-cell :lines))
+                          (and (= (plist-get stack-cell :lines)
+                                  (plist-get row-cell :lines))
+                               (> (plist-get stack-cell :columns)
+                                  (plist-get row-cell :columns)))))
+             (cell (if stacked stack-cell row-cell)))
+        (append cell
+                (list :char-width char-width :graphic t :compact stacked)))
     '(:columns 2 :lines 1 :width 40 :height 40 :char-width 1 :graphic nil)))
 
 (defun etaf-go--star-points (size)
@@ -1113,7 +1125,10 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
      :test #'equal))
    (root (etaf-go--session-root session))
    (size (etaf-go--session-size session))
-   (metrics (etaf-go--board-metrics size))
+   (metrics
+    (etaf-computed
+     (lambda () (etaf-go--board-metrics size))
+     :test #'equal))
    (path (etaf-ref (list root)))
    (mode (etaf-ref (etaf-go--session-mode session)))
    (practice-start (etaf-ref (list root)))
@@ -1175,12 +1190,16 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
    (compact
     (etaf-computed
      (lambda ()
-       (let ((width (car (etaf-value viewport)))
-             (char-width (or (plist-get metrics :char-width)
-                             (frame-char-width)))
-             (left (max 36 (* (+ size 2) (plist-get metrics :columns)))))
-         (and width
-              (< width (* char-width (+ left 40))))))
+       (let ((metrics (etaf-value metrics)))
+         (or (plist-get metrics :compact)
+             (let* ((width (car (etaf-value viewport)))
+                    (char-width (or (plist-get metrics :char-width)
+                                    (frame-char-width)))
+                    (limit (if (plist-get metrics :graphic)
+                               etaf-go--row-layout-columns
+                             78)))
+               (and width
+                    (< (floor width (max 1 char-width)) limit))))))
      :test #'eq)))
   :setup
   (progn (etaf-theme-provide theme) nil)
@@ -1308,8 +1327,9 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
       (flex :flex-direction (if (etaf-value compact) 'column 'row)
         (column :ref 'go-root :flex-shrink 0
           :width (list 'ch (max 36
-                                (* (+ size 2) (plist-get metrics :columns))))
-          :item-gap '(lh 1)
+                                (* (+ size 2)
+                                   (plist-get (etaf-value metrics) :columns))))
+          :item-gap '(lh 0)
           (flex :width 'stretch :justify-content 'space-between
             :align-items 'center
             (etaf-label :text (etaf-go--session-title session) :variant 'strong)
@@ -1318,15 +1338,14 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
                             (etaf-go--mode-name (etaf-value mode))
                             (plist-get (etaf-value position) :move-count)
                             (if (etaf-value dirty) " · 未保存" "")))))
-          (etaf-label :if (not (string-empty-p (etaf-go--session-info session)))
-            :text (etaf-go--session-info session) :variant 'muted)
           (etaf-alert :if (plist-get (etaf-value position) :error)
             :title "棋谱回放中断"
             :message (plist-get (etaf-value position) :error)
             :variant 'danger)
           (flex :width 'stretch :justify-content 'center
             (etaf-go--board :size size :position position :palette theme
-              :metrics metrics :marks marks :show-numbers show-numbers
+              :metrics (etaf-value metrics) :marks marks
+              :show-numbers show-numbers
               :territory territory
               :on-press
               (lambda (row column)
@@ -1456,14 +1475,20 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               :on-press #'etaf-help)
             (etaf-button :label "关闭" :ref 'go-close :variant 'ghost
               :on-press (lambda () (etaf-go--maybe-close dirty)))))
-        (box :width '(ch 2) :flex-shrink 0)
-        (column :width '(ch 34) :flex-shrink 0 :item-gap '(lh 1)
+        (box :if (not (etaf-value compact))
+          :width '(ch 2) :flex-shrink 0)
+        (column :width (if (etaf-value compact) 'stretch '(ch 34))
+          :flex-shrink 0 :item-gap '(lh 1)
           (etaf-label :text "对局" :variant 'muted)
           (text :font-weight 'bold
             (expr (etaf-go--turn-text (etaf-value position)
                                       (etaf-value mode)
                                       (etaf-value practice-color)
                                       (etaf-value edit-tool))))
+          (etaf-label :if (not (string-empty-p (etaf-go--session-info session)))
+            :text (truncate-string-to-width
+                   (etaf-go--session-info session) 32 nil nil "…")
+            :variant 'muted)
           (etaf-label :text (etaf-go--captures-line (etaf-value position))
             :variant 'muted)
           (etaf-label :if (etaf-value score)
