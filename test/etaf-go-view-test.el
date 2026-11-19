@@ -60,12 +60,13 @@
               ((symbol-function 'etaf-viewport)
                (lambda (&optional _) (cons 1440 50))))
       (let ((cell (etaf-go--board-metrics 9)))
-        (should (= (plist-get cell :lines) 3))
-        (should (= (plist-get cell :columns) 7))
-        (should (= (plist-get cell :width) 84))
-        (should (= (plist-get cell :height) 81))
+        (should (= (plist-get cell :lines) 4))
+        (should (= (plist-get cell :columns) 9))
+        (should (= (plist-get cell :width) 108))
+        (should (= (plist-get cell :height) 108))
         (should (= (plist-get cell :char-width) 12))
-        (should (plist-get cell :graphic))))))
+        (should (plist-get cell :graphic))
+        (should (plist-get cell :compact))))))
 
 (ert-deftest etaf-go-view-cell-aspect-selection ()
   "Cell selection takes the largest near-square cell that fits."
@@ -102,6 +103,22 @@
         (should (= (plist-get cell :columns) 4))
         (should (= (plist-get cell :height) 40))
         (should-not (plist-get cell :compact))))))
+
+(ert-deftest etaf-go-view-short-window-uses-two-lines ()
+  "A 45-line window still gives the board two text lines per cell."
+  (let ((etaf-go-cell-lines 'auto))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'etaf-display-metrics)
+               (lambda (&optional _)
+                 '(:char-width 7 :line-height 14 :ascent 80)))
+              ((symbol-function 'etaf-viewport)
+               (lambda (&optional _) (cons 1085 45))))
+      (let ((cell (etaf-go--board-metrics 19)))
+        (should (= (plist-get cell :lines) 2))
+        (should (= (plist-get cell :columns) 4))
+        (should (= (plist-get cell :width) 28))
+        (should (= (plist-get cell :height) 28))))))
 
 (ert-deftest etaf-go-view-narrow-window-stacks-panel ()
   "When the side panel would shrink the board, the board keeps its size."

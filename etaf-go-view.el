@@ -110,7 +110,10 @@ staying at the smallest square cell."
              (max-lines
               (if (integerp forced)
                   (max 1 (min 8 forced))
-                (max 1 (floor (max 0 (- window-rows 8)) grid))))
+                ;; Keep the title row and a little padding visible; the
+                ;; controls below the board may scroll rather than force a
+                ;; tiny one-line cell.
+                (max 1 (floor (max 0 (- window-rows 2)) grid))))
              (row-columns
               (if (integerp forced)
                   30

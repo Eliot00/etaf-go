@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.1") (etaf-ui "0.3.0"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -92,9 +92,10 @@
 
 (defcustom etaf-go-cell-lines 'auto
   "Height of one graphical board cell in text lines.
-`auto' chooses the largest near-square cell that leaves room for the
-controls and side panel.  An integer 1-8 forces that many lines:
-larger cells make the board bigger but may require scrolling."
+`auto' chooses the largest near-square cell that leaves the title and
+padding visible; the controls below the board may scroll on short
+frames.  An integer 1-8 forces that many lines: larger cells make the
+board bigger but may require scrolling."
   :type '(choice (const :tag "Auto" auto)
                  (integer :tag "Lines")))
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- The board now takes the window height above the title and padding instead
+  of reserving eight control rows, so a 45-line frame gives a 19x19 board
+  two-line cells (about 588x588 pixels on the default macOS metrics).
+  Controls below the board may scroll in short frames.
+- This also removes the worst rectangular cells: ratios such as 2.5 text
+  pixels per character made one-line cells 25 percent taller than wide.
+
 ## 0.3.0
 
 - Local two-player play: alternating turns, captures, simple ko, pass,
