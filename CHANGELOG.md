@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+- The application canvas fills the frame; spare width and height go to the
+  side panel, comment and move list instead of empty margins, and the control
+  rows sit at the bottom.
+- `L` (or the 行数 button) cycles the graphical cell height through auto, 1,
+  2, 3 and 4.  In a short window, two lines give a near-square 35x34 cell at
+  the cost of scrolling.
+- Ebox's display-metric cache is reset before fitting so the cell width and
+  height are measured in the application buffer.
+
 ## 0.3.1
 
 - The board now takes the window height above the title and padding instead

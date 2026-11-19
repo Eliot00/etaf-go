@@ -68,6 +68,30 @@
         (should (plist-get cell :graphic))
         (should (plist-get cell :compact))))))
 
+(ert-deftest etaf-go-view-cycle-cell-lines ()
+  "The cell-line control cycles auto, 1, 2, 3, 4 and back."
+  (let ((ref (etaf-ref 'auto))
+        (hint (etaf-ref nil)))
+    (dolist (expected '(1 2 3 4 auto))
+      (etaf-go--cycle-cell-lines ref hint)
+      (should (equal (etaf-value ref) expected)))))
+
+(ert-deftest etaf-go-view-forced-lines-are-square ()
+  "Forcing two lines gives a 35x34 cell for a 7x17 font."
+  (let ((etaf-go-cell-lines 2))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'etaf-display-metrics)
+               (lambda (&optional _)
+                 '(:char-width 7 :line-height 17 :ascent 80)))
+              ((symbol-function 'etaf-viewport)
+               (lambda (&optional _) (cons 1085 34))))
+      (let ((cell (etaf-go--board-metrics 19)))
+        (should (= (plist-get cell :lines) 2))
+        (should (= (plist-get cell :columns) 5))
+        (should (= (plist-get cell :width) 35))
+        (should (= (plist-get cell :height) 34))))))
+
 (ert-deftest etaf-go-view-cell-aspect-selection ()
   "Cell selection takes the largest near-square cell that fits."
   (let ((cell (etaf-go--best-cell 12 27 4 10)))

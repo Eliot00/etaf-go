@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.3.1
+;; Version: 0.3.2
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.1") (etaf-ui "0.3.0"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -121,7 +121,12 @@ board bigger but may require scrolling."
                  ;; global `line-spacing' adds a pixel gap between the board's
                  ;; image rows, so keep the application buffer at nil.
                  :on-fit (lambda (_window)
-                           (setq-local line-spacing nil))
+                           (setq-local line-spacing nil)
+                           ;; Ebox caches frame metrics without the buffer's
+                           ;; line spacing; measure this buffer afresh so cell
+                           ;; width and height come from the same context.
+                           (with-no-warnings
+                             (setq ebox--display-metrics-cache nil)))
                  :on-close (lambda () nil))
   (get-buffer name))
 

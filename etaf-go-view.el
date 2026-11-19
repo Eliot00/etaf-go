@@ -18,6 +18,7 @@
 (defvar etaf-go-appearance)
 (defvar etaf-go-directory)
 (defvar etaf-go-cell-lines)
+(defvar ebox--display-metrics-cache)
 (declare-function etaf-go--open-file "etaf-go" (file &optional practice))
 (declare-function etaf-go-new "etaf-go" (&optional size))
 (declare-function etaf-go-play "etaf-go" (&optional size))
@@ -1258,6 +1259,16 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
   (setf (etaf-value appearance-ref)
         (if (eq (etaf-value appearance-ref) 'dark) 'light 'dark)))
 
+(defun etaf-go--cycle-cell-lines (cell-lines-ref hint-ref)
+  "Cycle the graphical cell height through auto, 1, 2, 3 and 4 lines."
+  (let* ((values '(auto 1 2 3 4))
+         (next (or (cadr (memq (etaf-value cell-lines-ref) values)) 'auto)))
+    (setf (etaf-value cell-lines-ref) next
+          (etaf-value hint-ref)
+          (if (eq next 'auto)
+              "棋盘 cell 行数：自动"
+            (format "棋盘 cell 行数：%d（窗口不够高时会滚动）" next)))))
+
 (defun etaf-go--load (mode-ref dirty-ref)
   "Read another SGF file in a new buffer and close this one."
   (let ((file (etaf-call-with-input
@@ -1313,9 +1324,12 @@ With PLAY non-nil start a new local game instead of an editor record."
      :test #'equal))
    (root (etaf-go--session-root session))
    (size (etaf-go--session-size session))
+   (cell-lines (etaf-ref etaf-go-cell-lines))
    (metrics
     (etaf-computed
-     (lambda () (etaf-go--board-metrics size))
+     (lambda ()
+       (let ((etaf-go-cell-lines (etaf-value cell-lines)))
+         (etaf-go--board-metrics size)))
      :test #'equal))
    (path (etaf-ref (list root)))
    (mode (etaf-ref (etaf-go--session-mode session)))
@@ -1394,8 +1408,8 @@ With PLAY non-nil start a new local game instead of an editor record."
      :test #'eq)))
   :setup
   (progn (etaf-theme-provide theme) nil)
-  :view
-  (flex :width 'stretch :height 'stretch :flex-direction 'column
+   :view
+  (flex :width '(vw 100) :height '(vh 100) :flex-direction 'column
     :background-color (etaf-go--color :ui-bg)
     :color (etaf-go--color :ui-fg)
     :aria-label "围棋"
@@ -1407,7 +1421,8 @@ With PLAY non-nil start a new local game instead of an editor record."
             "研究模式点击棋盘落子，分支直接写入棋谱：u 撤销，s 停一手，x 删除分支。"
             "e 进入编辑模式：先选工具再点棋盘，可摆黑/白子、擦除、加三角/方块/圆圈/叉或标签；"
             "P 切换行棋方。新建棋谱后用编辑模式摆题，再保存成 .sgf。"
-            "S 显示数子法形势判断；c 编辑注释；w 保存，W 另存为；N 新建；o 打开。"
+            "S 显示数子法形势判断；L 循环 cell 行数（矮窗口选 2 更接近正方形，可能滚动）。"
+            "c 编辑注释；w 保存，W 另存为；N 新建；o 打开。"
             "提子、打劫和禁着点由内置规则判断；坐标列不包含 I。")
     :keys
     (list
@@ -1493,6 +1508,9 @@ With PLAY non-nil start a new local game instead of an editor record."
                                   (if (equal next "B") "黑" "白"))))
                 (setf (etaf-value hint) "P 只在编辑模式切换行棋方")))
             "行棋方")
+      (list "L"
+            (lambda () (etaf-go--cycle-cell-lines cell-lines hint))
+            "棋盘 cell 行数")
       (list "T"
             (lambda () (etaf-go--toggle-theme appearance))
             "主题")
@@ -1530,11 +1548,11 @@ With PLAY non-nil start a new local game instead of an editor record."
             "新建")
       (list "<f1>" #'etaf-help "帮助")
       (list "q" (lambda () (etaf-go--maybe-close dirty)) "关闭"))
-    (box :flex-grow 1 :flex-basis '(lh 0) :min-height '(lh 0))
-    (flex :width 'stretch :justify-content 'center :align-items 'flex-start
+    (flex :width 'stretch :flex-grow 1 :justify-content 'center
+      :align-items 'stretch
       :padding '((lh 1) (ch 2))
-      (flex :flex-direction (if (etaf-value compact) 'column 'row)
-        (column :ref 'go-root :flex-shrink 0
+      (flex :width 'stretch :flex-direction (if (etaf-value compact) 'column 'row)
+        (column :ref 'go-root :flex-shrink 0 :height 'stretch
           :width (list 'ch (max 36
                                 (* (+ size 2)
                                    (plist-get (etaf-value metrics) :columns))))
@@ -1597,6 +1615,7 @@ With PLAY non-nil start a new local game instead of an editor record."
                           ('practice "点击棋盘作答 · n 提示 · r 重来")
                           ('edit "选工具后点棋盘 · P 行棋方 · w 保存")
                           (_ "n/p 翻页 · m 切换模式 · ? 帮助"))))))
+          (box :flex-grow 1 :flex-basis '(lh 0) :min-height '(lh 0))
           (flex :width 'stretch :justify-content 'center
             (etaf-button
              :label (format "模式·%s" (etaf-go--mode-name (etaf-value mode)))
@@ -1695,7 +1714,10 @@ With PLAY non-nil start a new local game instead of an editor record."
         (box :if (not (etaf-value compact))
           :width '(ch 2) :flex-shrink 0)
         (column :width (if (etaf-value compact) 'stretch '(ch 34))
-          :flex-shrink 0 :item-gap '(lh 1)
+          :flex-grow (if (etaf-value compact) 0 1)
+          :flex-shrink 0
+          :height (if (etaf-value compact) nil 'stretch)
+          :item-gap '(lh 1)
           (etaf-label :text "对局" :variant 'muted)
           (text :font-weight 'bold
             (expr (etaf-go--turn-text (etaf-value position)
@@ -1726,6 +1748,11 @@ With PLAY non-nil start a new local game instead of an editor record."
                            (max (etaf-go--session-main-count session)
                                 (plist-get (etaf-value position) :move-count))))
            :variant 'muted)
+          (etaf-button :label (format "行数·%s" (etaf-value cell-lines))
+            :ref 'go-cell-lines :variant 'ghost
+            :help-echo "循环切换棋盘 cell 行数（auto/1/2/3/4）"
+            :on-press
+            (lambda () (etaf-go--cycle-cell-lines cell-lines hint)))
           (etaf-label :text "注释" :variant 'muted)
           (column :height '(lh 7) :overflow 'scroll :width 'stretch
             (etaf-label :if (etaf-value node-name)
@@ -1742,8 +1769,8 @@ With PLAY non-nil start a new local game instead of an editor record."
               (lambda ()
                 (etaf-go--open-variations mode variations-open
                                           variations hint))))
-          (column :height '(lh 10) :overflow 'scroll :width 'stretch
-            :item-gap '(lh 0)
+          (column :height '(lh 10) :flex-grow 1 :overflow 'scroll
+            :width 'stretch :item-gap '(lh 0)
             (etaf-button :for (entry (etaf-value moves))
               :key (plist-get entry :index)
               :label (format "%3d  %s"
@@ -1757,7 +1784,6 @@ With PLAY non-nil start a new local game instead of an editor record."
                 (etaf-go--jump path hint (plist-get entry :path)))))
           (etaf-label :if (null (etaf-value moves))
             :text "还没有落子。" :variant 'muted))))
-    (box :flex-grow 1 :flex-basis '(lh 0) :min-height '(lh 0))
     (etaf-dialog :open variations-open :title "选择变化"
       :width '(ch 48) :height '(lh 16) :compact t :close-label "关闭"
       :on-close (lambda () (setf (etaf-value variations-open) nil))
@@ -1842,7 +1868,7 @@ replace application buffers without closing one inside ETAF's event drain."
   :setup
   (progn (etaf-theme-provide theme) nil)
   :view
-  (flex :width 'stretch :height 'stretch :flex-direction 'column
+  (flex :width '(vw 100) :height '(vh 100) :flex-direction 'column
     :background-color (etaf-go--color :ui-bg)
     :color (etaf-go--color :ui-fg)
     :aria-label "围棋主界面"
