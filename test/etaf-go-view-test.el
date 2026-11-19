@@ -5,6 +5,13 @@
 (require 'cl-lib)
 (require 'etaf-go)
 
+(defun etaf-go-test--open-sample (&optional mode)
+  "Open the sample 9x9 record in MODE, default practice."
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
+         (session (etaf-go--session-create "test.sgf" root
+                                           (or mode 'practice))))
+    (etaf-go--display session "*Go: test*")))
+
 (defun etaf-go-test--press (runtime reference)
   "Invoke REFERENCE's committed press handler in RUNTIME."
   (let ((handler (plist-get (etaf-runtime-host-props-for runtime reference)
@@ -25,7 +32,7 @@
 
 (ert-deftest etaf-go-view-svg-cells ()
   "Cell artwork builds valid SVG descriptors."
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
          (size 9)
          (position (etaf-go--position size root (list root)))
          (marks (etaf-go--node-marks root size))
@@ -113,7 +120,7 @@
 
 (ert-deftest etaf-go-view-svg-resolves-palette-handle ()
   "A reactive palette handle still paints the board instead of black."
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
          (size 9)
          (position (etaf-go--position size root (list root)))
          (marks (etaf-go--node-marks root size))
@@ -160,7 +167,7 @@
           (setq-default line-spacing 0.1)
           (cl-letf (((symbol-function 'display-graphic-p)
                      (lambda (&rest _) nil)))
-            (let ((buffer (etaf-go-demo)))
+            (let ((buffer (etaf-go-test--open-sample)))
               (unwind-protect
                   (should (null (buffer-local-value 'line-spacing buffer)))
                 (when (and (buffer-live-p buffer)
@@ -171,7 +178,7 @@
 (ert-deftest etaf-go-view-practice-and-study ()
   "Practice, hint, undo, mode switching, study moves and passing work."
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
-    (let* ((buffer (etaf-go-demo))
+    (let* ((buffer (etaf-go-test--open-sample))
            (runtime (etaf-runtime-for-buffer buffer)))
       (unwind-protect
           (progn
@@ -227,8 +234,8 @@
            (buffer nil))
       (unwind-protect
           (progn
-            (write-region etaf-go--demo-sgf nil file nil 'silent)
-            (setq buffer (etaf-go-open file))
+            (write-region etaf-go-test--demo-sgf nil file nil 'silent)
+            (setq buffer (etaf-go-open-file file))
             (let ((runtime (etaf-runtime-for-buffer buffer)))
               ;; Replay -> practice -> study, then play a recorded branch move.
               (etaf-go-test--press runtime 'go-mode)
@@ -256,7 +263,7 @@
                 (should (string-match-p "B\\[bb\\]" text)))
               ;; A fresh session of the saved file replays the branch.
               (etaf-go-close buffer)
-              (setq buffer (etaf-go-open file)
+              (setq buffer (etaf-go-open-file file)
                     runtime (etaf-runtime-for-buffer buffer))
               (etaf-go-test--press runtime 'go-mode)
               (etaf-go-test--press runtime 'go-mode)
@@ -272,7 +279,7 @@
 (ert-deftest etaf-go-view-study-does-not-become-a-solution ()
   "Practice ignores branches added by study mode."
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
-    (let* ((buffer (etaf-go-demo))
+    (let* ((buffer (etaf-go-test--open-sample))
            (runtime (etaf-runtime-for-buffer buffer)))
       (unwind-protect
           (progn
@@ -296,7 +303,7 @@
 (ert-deftest etaf-go-view-comment-editing ()
   "The comment dialog opens, submits and closes from the buttons."
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
-    (let* ((buffer (etaf-go-demo))
+    (let* ((buffer (etaf-go-test--open-sample))
            (runtime (etaf-runtime-for-buffer buffer)))
       (unwind-protect
           (progn
@@ -313,7 +320,7 @@
 
 (ert-deftest etaf-go-view-comment-submit-writes-node ()
   "Submitting the editor writes or removes the current node's comment."
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
          (path (etaf-ref (list root)))
          (open (etaf-ref t))
          (draft (etaf-ref "试一下注释"))
@@ -330,7 +337,7 @@
 
 (ert-deftest etaf-go-view-delete-branch ()
   "Deleting a branch removes its node and marks the session dirty."
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
          (mode (etaf-ref 'study))
          (path (etaf-ref (list root)))
          (dirty (etaf-ref nil))
@@ -349,7 +356,7 @@
   "Closing a dirty session asks first and keeps the buffer on decline."
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
             ((symbol-function 'etaf-confirm-dialog) (lambda (_) nil)))
-    (let ((buffer (etaf-go-demo)))
+    (let ((buffer (etaf-go-test--open-sample)))
       (unwind-protect
           (progn
             (with-current-buffer buffer
@@ -381,7 +388,7 @@
 (ert-deftest etaf-go-view-edit-mode-authoring ()
   "Edit mode writes setup stones, marks and the player into the node."
   (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
-    (let* ((buffer (etaf-go-demo))
+    (let* ((buffer (etaf-go-test--open-sample))
            (runtime (etaf-runtime-for-buffer buffer))
            (root (etaf-go--session-root (etaf-app-state buffer))))
       (unwind-protect
@@ -422,7 +429,7 @@
 
 (ert-deftest etaf-go-view-edit-skips-move-nodes ()
   "Editing a node that holds a move explains where to edit instead."
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
+  (let* ((root (etaf-go--sgf-parse etaf-go-test--demo-sgf))
          (move (car (etaf-go--node-children root)))
          (path (etaf-ref (list root move)))
          (dirty (etaf-ref nil))
@@ -489,7 +496,7 @@
               (should (string-match-p "TR\\[dc\\]" text))
               (should (string-match-p "PL\\[W\\]" text)))
             (etaf-go-close buffer)
-            (setq buffer (etaf-go-open file))
+            (setq buffer (etaf-go-open-file file))
             (let* ((session (etaf-app-state buffer))
                    (root (etaf-go--session-root session))
                    (board (plist-get (etaf-go--position 9 root (list root))
@@ -501,6 +508,111 @@
                    (etaf-go--session-p (etaf-app-state buffer)))
           (etaf-go-close buffer))
         (delete-directory directory t)))))
+
+(ert-deftest etaf-go-view-home ()
+  "The main menu opens with the local-play choices."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let ((buffer (etaf-go)))
+      (unwind-protect
+          (progn
+            (should (eq (etaf-app-state buffer) 'home))
+            (should (string-match-p "本地对弈" (etaf-go-test--text buffer)))
+            (should (string-match-p "19 路" (etaf-go-test--text buffer)))
+            (should (string-match-p "打开棋谱" (etaf-go-test--text buffer))))
+        (when (buffer-live-p buffer)
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-home-launches-game ()
+  "A menu choice opens the game and closes the menu without hanging."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((home (etaf-go))
+           (runtime (etaf-runtime-for-buffer home)))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-home-play-9)
+            (sit-for 0.3)
+            (should-not (buffer-live-p home))
+            (should (cl-find-if
+                     (lambda (buffer)
+                       (string-prefix-p "*Go: 对弈 9 路*"
+                                        (buffer-name buffer)))
+                     (buffer-list))))
+        (dolist (buffer (buffer-list))
+          (when (and (string-prefix-p "*Go" (buffer-name buffer))
+                     (etaf-app-state buffer))
+            (etaf-go-close buffer)))))))
+
+(ert-deftest etaf-go-view-play-hot-seat ()
+  "Local play alternates turns, ends after two passes and can undo."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-play 9))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            (should (string-match-p "模式·对弈" (etaf-go-test--text buffer)))
+            (should (string-match-p "黑棋行棋" (etaf-go-test--text buffer)))
+            ;; Black and White alternate on the same board.
+            (etaf-go-test--press runtime 'go-cell-3-3)
+            (should (string-match-p "白棋行棋" (etaf-go-test--text buffer)))
+            (etaf-go-test--press runtime 'go-cell-4-4)
+            (should (string-match-p "黑棋行棋" (etaf-go-test--text buffer)))
+            ;; Undo removes the played node, not just the cursor.
+            (etaf-go-test--press runtime 'go-prev)
+            (should (string-match-p "白棋行棋" (etaf-go-test--text buffer)))
+            (let* ((session (etaf-app-state buffer))
+                   (root (etaf-go--session-root session)))
+              (should (= (length (etaf-go--node-children root)) 1)))
+            ;; Two passes finish the game and show the area score.
+            (etaf-go-test--press runtime 'go-pass)
+            (etaf-go-test--press runtime 'go-pass)
+            (should (string-match-p "对局结束" (etaf-go-test--text buffer)))
+            (should (string-match-p "数子" (etaf-go-test--text buffer)))
+            ;; Undo reopens the game.
+            (etaf-go-test--press runtime 'go-prev)
+            (should-not (string-match-p "对局结束"
+                                        (etaf-go-test--text buffer))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-play-resign ()
+  "Resigning ends the game for the side to move."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
+            ((symbol-function 'etaf-confirm-dialog) (lambda (_) t)))
+    (let* ((buffer (etaf-go-play 9))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-resign)
+            (should (string-match-p "白中盘胜" (etaf-go-test--text buffer))))
+        (when (and (buffer-live-p buffer)
+                   (etaf-go--session-p (etaf-app-state buffer)))
+          (etaf-go-close buffer))))))
+
+(ert-deftest etaf-go-view-play-new-game ()
+  "The new button in play mode replaces the game with a fresh one."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-play 9))
+           (runtime (etaf-runtime-for-buffer buffer)))
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'etaf-call-with-input)
+                       (lambda (reader) (funcall reader)))
+                      ((symbol-function 'read-number) (lambda (&rest _) 13))
+                      ((symbol-function 'etaf-confirm-dialog)
+                       (lambda (&rest _) t)))
+              (etaf-go-test--press runtime 'go-new)
+              (sit-for 0.3))
+            (should-not (buffer-live-p buffer))
+            (should (cl-find-if
+                     (lambda (candidate)
+                       (string-prefix-p "*Go: 对弈 13 路*"
+                                        (buffer-name candidate)))
+                     (buffer-list))))
+        (dolist (candidate (buffer-list))
+          (when (and (string-prefix-p "*Go" (buffer-name candidate))
+                     (etaf-app-state candidate))
+            (etaf-go-close candidate)))))))
 
 (provide 'etaf-go-view-test)
 ;;; etaf-go-view-test.el ends here

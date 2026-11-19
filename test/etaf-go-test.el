@@ -24,6 +24,12 @@
 (setq load-prefer-newer t)
 (require 'etaf-go)
 
+(defconst etaf-go-test--demo-sgf
+  (concat "(;GM[1]FF[4]SZ[9]CA[UTF-8]GN[提一子]"
+          "C[黑先，提掉白▲一子。]AB[de][fe][ed]AW[ee]TR[ee]"
+          ";B[ef]C[提子成功，白棋被提。])")
+  "A 9x9 capture problem used by the tests.")
+
 (let* ((test-dir (file-name-directory (or load-file-name buffer-file-name))))
   (load (expand-file-name "etaf-go-rules-test.el" test-dir) nil t)
   (load (expand-file-name "etaf-go-sgf-test.el" test-dir) nil t)

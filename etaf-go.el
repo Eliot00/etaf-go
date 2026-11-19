@@ -1,6 +1,6 @@
-;;; etaf-go.el --- Go records and life-and-death practice on ETAF -*- lexical-binding: t -*-
+;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.2.1
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.1") (etaf-ui "0.3.0"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -8,13 +8,16 @@
 ;; Maintainer: Elliot <hack00mind@gmail.com>
 
 ;;; Commentary:
-;; A small Go (weiqi) application built on ETAF.  It reads SGF records and
-;; renders the board with vector stones, coordinate margins and SGF marks.
+;; A small Go (weiqi) application built on ETAF.  It reads SGF records,
+;; plays local two-player games and renders the board with vector stones,
+;; coordinate margins and SGF marks.
 ;;
-;; There is no computer player: Go needs a real engine such as KataGo, and
-;; this application deliberately covers the everyday study workflow first.
+;; There is no computer player: Go needs a real engine such as KataGo.
+;; `play' is hot-seat: both sides use the same board and alternate turns.
 ;;
-;; Four modes:
+;; Five modes:
+;;   play     - local two-player game with captures, ko, pass, resign,
+;;              undo and an area-score result after two passes;
 ;;   replay   - read a record and follow its variations;
 ;;   practice - answer a life-and-death problem; moves are checked against
 ;;              the SGF's next solution move and replies are played for you;
@@ -27,10 +30,18 @@
 ;; bordered by one color only.  Seki and life-and-death are left neutral,
 ;; so treat it as a study aid rather than a finished score.
 ;;
-;; Function: etaf-go-open (&optional file practice)
-;; Open FILE, or read one from `etaf-go-directory'.  With PRACTICE non-nil
-;; the session starts in practice mode.  Interactively, a prefix argument
-;; selects practice mode.
+;; Function: etaf-go ()
+;; Open the main menu: new local game, open a record, practice or author.
+;;
+;; Function: etaf-go-open ()
+;; Alias for `etaf-go'; opens the main menu.
+;;
+;; Function: etaf-go-open-file (&optional file practice)
+;; Open FILE directly, or read one from `etaf-go-directory'.  With
+;; PRACTICE non-nil the session starts in practice mode.
+;;
+;; Function: etaf-go-play (&optional size)
+;; Start a local two-player game on a SIZE board, defaulting to 19.
 ;;
 ;; Function: etaf-go-new (&optional size)
 ;; Open an empty record in edit mode, ready to be set up and saved.
@@ -38,17 +49,17 @@
 ;; Function: etaf-go-problems ()
 ;; Choose a life-and-death problem from `etaf-go-problem-directory'.
 ;;
-;; Function: etaf-go-demo ()
-;; Open a built-in 9x9 capture problem, useful for a first look.
-;;
 ;; Function: etaf-go-close (&optional buffer)
-;; Close the Go application in BUFFER.
+;; Close the Go application or main menu in BUFFER.
+;;
+;; The package installs no global keys.  Use these commands from your own
+;; configuration if you want bindings.
 ;;
 ;; Keys in the board buffer: n/p next/previous, g start, G end, m cycle
 ;; replay/practice/study, e edit, u undo, r reset, v variations, a hint,
 ;; t move numbers, S area score, P player in edit, T theme, s pass in
-;; study, c comment, x delete branch, w/W save, N new, o open, F1 help
-;; and q close.
+;; play/study, R resign in play, c comment, x delete branch, w/W save,
+;; N new, o open, F1 help and q close.
 
 ;;; Code:
 (require 'etaf)
@@ -58,6 +69,8 @@
   (file-name-directory (or load-file-name buffer-file-name)))
 
 (require 'etaf-go-view)
+
+(declare-function etaf-go--home-open "etaf-go-view" ())
 
 (defgroup etaf-go nil
   "Go board, SGF replay and life-and-death practice."
@@ -84,12 +97,6 @@ controls and side panel.  An integer 1-8 forces that many lines:
 larger cells make the board bigger but may require scrolling."
   :type '(choice (const :tag "Auto" auto)
                  (integer :tag "Lines")))
-
-(defconst etaf-go--demo-sgf
-  (concat "(;GM[1]FF[4]SZ[9]CA[UTF-8]GN[提一子]"
-          "C[黑先，提掉白▲一子。]AB[de][fe][ed]AW[ee]TR[ee]"
-          ";B[ef]C[提子成功，白棋被提。])")
-  "A small capture problem used by `etaf-go-demo'.")
 
 (defun etaf-go--read-sgf (file)
   "Return the SGF text of FILE."
@@ -128,8 +135,20 @@ larger cells make the board bigger but may require scrolling."
     (etaf-go--display session name)))
 
 ;;;###autoload
-(defun etaf-go-open (&optional file practice)
-  "Open an SGF record, starting in practice mode with PRACTICE non-nil.
+(defun etaf-go ()
+  "Open the Go main menu."
+  (interactive)
+  (etaf-go--home-open))
+
+;;;###autoload
+(defun etaf-go-open ()
+  "Open the Go main menu."
+  (interactive)
+  (etaf-go--home-open))
+
+;;;###autoload
+(defun etaf-go-open-file (&optional file practice)
+  "Open the SGF record FILE, starting in practice mode with PRACTICE.
 Interactively read FILE from `etaf-go-directory'; a prefix argument
 starts a life-and-death session."
   (interactive
@@ -142,25 +161,41 @@ starts a life-and-death session."
     (setq file (read-file-name "SGF 棋谱: " nil nil t)))
   (etaf-go--open-file file practice))
 
+(defun etaf-go--empty-session (size mode)
+  "Return an empty SGF session of SIZE for MODE.
+MODE is `play' or `edit' and selects the title, file name and buffer."
+  (let ((size (or size 19)))
+    (unless (and (integerp size) (<= 2 size 25))
+      (user-error "棋盘大小需在 2 到 25 之间"))
+    (let* ((title (if (eq mode 'play) "新对局" "新棋谱"))
+           (text (format
+                  "(;GM[1]FF[4]SZ[%d]CA[UTF-8]GN[%s]KM[6.5]PL[B])"
+                  size title))
+           (directory (if (file-directory-p etaf-go-directory)
+                          etaf-go-directory
+                        default-directory))
+           (file (expand-file-name (concat title ".sgf") directory))
+           (root (etaf-go--sgf-parse text)))
+      (etaf-go--session-create file root mode))))
+
+;;;###autoload
+(defun etaf-go-play (&optional size)
+  "Start a local two-player game on a SIZE board, defaulting to 19.
+Both sides alternate turns on the same board; `s' passes and `R'
+resigns.  Two passes end the game and show the area score."
+  (interactive (list (read-number "棋盘大小: " 19)))
+  (let* ((session (etaf-go--empty-session size 'play))
+         (size (etaf-go--session-size session)))
+    (etaf-go--display session (format "*Go: 对弈 %d 路*" size))))
+
 ;;;###autoload
 (defun etaf-go-new (&optional size)
   "Open a new empty record on a SIZE board, defaulting to 19.
 New records start in edit mode so a position can be set up and saved
 as a life-and-death problem."
   (interactive (list (read-number "棋盘大小: " 19)))
-  (let ((size (or size 19)))
-    (unless (and (integerp size) (<= 2 size 25))
-      (user-error "棋盘大小需在 2 到 25 之间"))
-    (let* ((text (format
-                  "(;GM[1]FF[4]SZ[%d]CA[UTF-8]GN[新棋谱]KM[6.5]PL[B])"
-                  size))
-           (directory (if (file-directory-p etaf-go-directory)
-                          etaf-go-directory
-                        default-directory))
-           (file (expand-file-name "新棋谱.sgf" directory))
-           (root (etaf-go--sgf-parse text))
-           (session (etaf-go--session-create file root 'edit)))
-      (etaf-go--display session "*Go: 新棋谱*"))))
+  (let ((session (etaf-go--empty-session size 'edit)))
+    (etaf-go--display session "*Go: 新棋谱*")))
 
 ;;;###autoload
 (defun etaf-go-problems ()
@@ -178,20 +213,12 @@ as a life-and-death problem."
       (etaf-go--open-file (cdr (assoc choice choices)) t))))
 
 ;;;###autoload
-(defun etaf-go-demo ()
-  "Open a built-in 9x9 capture problem."
-  (interactive)
-  (let* ((root (etaf-go--sgf-parse etaf-go--demo-sgf))
-         (session (etaf-go--session-create
-                   "示例死活题" root 'practice)))
-    (etaf-go--display session "*Go: 示例死活题*")))
-
-;;;###autoload
 (defun etaf-go-close (&optional buffer)
-  "Close the Go application in BUFFER, or the current buffer."
+  "Close the Go application or main menu in BUFFER."
   (interactive)
-  (let ((buffer (or buffer (current-buffer))))
-    (unless (etaf-go--session-p (etaf-app-state buffer))
+  (let* ((buffer (or buffer (current-buffer)))
+         (state (etaf-app-state buffer)))
+    (unless (or (etaf-go--session-p state) (eq state 'home))
       (user-error "当前缓冲区不是围棋应用"))
     (etaf-app-close buffer)))
 

@@ -35,20 +35,19 @@ Close every running Go application first so its Component instances are
 disposed before their declarations are replaced."
   (interactive)
   (dolist (buffer (buffer-list))
-    (when (etaf-go--session-p (etaf-app-state buffer))
-      (etaf-go-close buffer)))
+    (let ((state (etaf-app-state buffer)))
+      (when (or (etaf-go--session-p state) (eq state 'home))
+        (etaf-go-close buffer))))
   (etaf-component-redefine-run
    (lambda ()
      (load (expand-file-name "etaf-go-rules.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go-sgf.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go-view.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go.el" etaf-go--directory) nil t)))
-  (etaf-go-demo))
+  (etaf-go))
 
-(global-set-key (kbd "C-c g") #'etaf-go-demo)
-(global-set-key (kbd "C-c G") #'etaf-go-dev-reload)
-
-(message "etaf-go development loaded from %s" etaf-go--directory)
+(message "etaf-go development loaded from %s; use M-x etaf-go or M-x etaf-go-dev-reload"
+         etaf-go--directory)
 
 (provide 'init-dev)
 ;;; init-dev.el ends here

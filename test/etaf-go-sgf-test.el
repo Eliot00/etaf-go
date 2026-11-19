@@ -5,10 +5,10 @@
 (require 'cl-lib)
 (require 'etaf-go)
 
-(defconst etaf-go-test--demo etaf-go--demo-sgf)
+(defconst etaf-go-test--demo etaf-go-test--demo-sgf)
 
-(ert-deftest etaf-go-sgf-demo-position ()
-  "The built-in demo parses and captures its white stone."
+(ert-deftest etaf-go-sgf-sample-position ()
+  "The sample record parses and captures its white stone."
   (let* ((root (etaf-go--sgf-parse etaf-go-test--demo))
          (size (etaf-go--board-size root))
          (session (etaf-go--session-create "demo.sgf" root 'practice))

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Local two-player play: alternating turns, captures, simple ko, pass,
+  resign, undo, restart, an area-score result after two passes, and saving
+  the game tree as SGF.
+- `etaf-go` and `etaf-go-open` now open a main menu for play, records,
+  problems and authoring; `etaf-go-open-file` opens a record directly.
+- `etaf-go-play` starts a local game and `etaf-go-new` still opens the
+  position editor.
+- Removed `etaf-go-demo` and the built-in demo command.
+- The package installs no global key bindings.
+
 ## 0.2.1
 
 - The graphical board now takes the largest near-square cell that fits the

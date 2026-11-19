@@ -1,11 +1,13 @@
 # etaf-go
 
-在 [ETAF](https://github.com/emacs-taf/etaf) 上实现的围棋 SGF 打谱与死活题应用。
+在 [ETAF](https://github.com/emacs-taf/etaf) 上实现的围棋对弈、SGF 打谱与死活题应用。
 
-没有 AI，不依赖 KataGo/OpenSpiel；先把「看谱、做题、试下」这条日常流程做好。
+对弈是本地双人（同一块棋盘轮流落子）；没有 AI，不依赖 KataGo/OpenSpiel。
 
 ## 功能
 
+- 本地双人对弈：轮流落子，内置提子、简单劫、禁着点；`s` 停一手，`R` 认输，
+  `u` 撤销，双方连续停一手后自动按数子法给出结果，可保存成 SGF。
 - SGF (FF[4]) 打谱：主谱、变化、摆子、注释、SGF 标记、手数、提子数。
 - 死活题练习：按 SGF 的下一手判题，答错不落子，答对后自动走对手应对；支持提示和重来。
 - 自由研究：从当前局面落子，内置提子、简单劫、禁着点判断；支持停一手。
@@ -50,12 +52,12 @@
 (use-package etaf-go
   :vc (:url "https://github.com/Eliot00/etaf-go"
        :rev :newest)
-  :commands (etaf-go-open etaf-go-new etaf-go-problems
-             etaf-go-demo etaf-go-close))
+  :commands (etaf-go etaf-go-open etaf-go-open-file etaf-go-play
+             etaf-go-new etaf-go-problems etaf-go-close))
 ```
 
 入口和所有模块都在仓库根目录，`package-vc` 会把它们一起编译并生成 autoload，
-不需要 `:lisp-dir`。
+不需要 `:lisp-dir`。本包不设置任何全局按键，需要绑定请在 `:bind` 里自己加。
 
 ### 本地开发
 
@@ -64,8 +66,8 @@
 ```elisp
 (use-package etaf-go
   :load-path "/absolute/path/to/etaf-go"
-  :commands (etaf-go-open etaf-go-new etaf-go-problems
-             etaf-go-demo etaf-go-close))
+  :commands (etaf-go etaf-go-open etaf-go-open-file etaf-go-play
+             etaf-go-new etaf-go-problems etaf-go-close))
 ```
 
 注意 `:load-path` 要写**绝对路径**（`~` 不会被 `require` 展开）。
@@ -73,8 +75,10 @@
 ## 使用
 
 ```
-M-x etaf-go-demo       ; 内置 9x9 提子题
-M-x etaf-go-open       ; 打开 SGF；C-u 前缀进入死活练习
+M-x etaf-go            ; 主界面：对弈 / 打开棋谱 / 死活题 / 新建棋谱
+M-x etaf-go-open       ; 同上，打开主界面
+M-x etaf-go-play       ; 直接开一局本地双人对弈（默认 19 路）
+M-x etaf-go-open-file  ; 直接打开 SGF；C-u 前缀进入死活练习
 M-x etaf-go-new        ; 新建空棋谱（默认 19 路），直接进入编辑模式
 M-x etaf-go-problems   ; 从 etaf-go-problem-directory 选死活题
 ```
@@ -88,6 +92,8 @@ M-x etaf-go-problems   ; 从 etaf-go-problem-directory 选死活题
 
 ## 模式与按键
 
+- `对弈`：点击棋盘轮流落子；`s` 停一手，`R` 认输，`u` 撤销，`r` 重新开始。
+  双方连续停一手后结束，自动显示数子结果。
 - `打谱`：`n/p` 前后翻页，`g/G` 开头/末手，`v` 选择变化。
 - `死活`：点击棋盘作答；`n` 提示下一手；`r` 重来；答对后对手的应手会自动走上。
 - `研究`：点击棋盘自由落子；`u` 撤销；`s` 停一手。
@@ -95,14 +101,15 @@ M-x etaf-go-problems   ; 从 etaf-go-problem-directory 选死活题
   `P` 切换行棋方，`w` 保存。
 
 其他键：`m` 在打谱/死活/研究之间循环，`t` 显示手数，`S` 形势判断，`T` 换主题，
-`c` 编辑注释，`x` 删除当前分支，`N` 新建棋谱，`o` 打开别的棋谱，`F1` 帮助，`q` 关闭。
+`c` 编辑注释，`x` 删除当前分支，`N` 新建（对弈中是开新局），`o` 打开别的棋谱，
+`F1` 帮助，`q` 关闭。
 
 ### 做一个自己的死活题
 
 1. `M-x etaf-go-new` 新建 9/13/19 路空盘，自动进入编辑模式。
 2. 选 `黑子`/`白子` 摆出题目，`擦除` 改错，`标签`/`三角` 等标注要点。
 3. `P` 设置轮到谁走；`c` 写题目说明。
-4. `w` 保存为 `.sgf`，之后用 `M-x etaf-go-open` 打开，`C-u` 或 `m` 进死活模式练习。
+4. `w` 保存为 `.sgf`，之后用 `M-x etaf-go-open-file` 打开，`C-u` 或 `m` 进死活模式练习。
 
 编辑写入当前节点的 `AB`/`AW`/`AE`、`TR`/`SQ`/`CR`/`MA`、`LB` 和 `PL` 属性；
 含落子的节点不允许摆子，按 `g` 回到开局再编辑。
@@ -114,7 +121,7 @@ M-x etaf-go-problems   ; 从 etaf-go-problem-directory 选死活题
 ```sh
 make test     # ERT：规则、SGF、SVG 单元格、真实 UI 事件链路
 make check    # 字节编译 + 测试
-make smoke    # 批处理里挂载 demo
+make smoke    # 批处理里挂载主界面
 ```
 
 这台机器的 `emacs` 不在 PATH 时，Makefile 会回退到
@@ -130,10 +137,10 @@ make EMACS=/Applications/Emacs.app/Contents/MacOS/Emacs check
 /Applications/Emacs.app/Contents/MacOS/Emacs -Q -l dev/init-dev.el
 ```
 
-`dev/init-dev.el` 会设置 `load-prefer-newer`、示例目录和快捷键：
+`dev/init-dev.el` 会设置 `load-prefer-newer` 和示例目录，不安装快捷键：
 
-- `C-c g` 打开 demo
-- `C-c G` 重新加载
+- `M-x etaf-go` 打开主界面
+- `M-x etaf-go-dev-reload` 重新加载并回到主界面
 
 ETAF Component 有重复定义保护。改 `etaf-go-view.el` 后不要直接 `C-M-x`；
 先关闭 app，再用 `etaf-go-dev-reload`（它内部用 `etaf-component-redefine-run`），
@@ -145,7 +152,8 @@ ETAF Component 有重复定义保护。改 `etaf-go-view.el` 后不要直接 `C-
 - 形势判断是数子法的静态估计：只把「四周全是同色」的空区算作地盘，
   公活/劫争/死活未定处按中性处理，不是终局判定。
 - 编辑只修改当前节点；含落子的节点要先按 `g` 回到开局再摆子。
-- 没有 AI；KataGo/OpenSpiel 接入是后续独立工作。
+- 对弈目前是本地双人；没有 AI，KataGo/OpenSpiel 接入是后续独立工作。
+- 对弈结束后的数子结果只显示、不写回 SGF 的 `RE`；保存的是完整着法树。
 - 暂不做题库进度、搜索和批量管理。
 
 ## License

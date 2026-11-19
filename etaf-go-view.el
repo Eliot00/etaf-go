@@ -20,6 +20,9 @@
 (defvar etaf-go-cell-lines)
 (declare-function etaf-go--open-file "etaf-go" (file &optional practice))
 (declare-function etaf-go-new "etaf-go" (&optional size))
+(declare-function etaf-go-play "etaf-go" (&optional size))
+(declare-function etaf-go-open-file "etaf-go" (&optional file practice))
+(declare-function etaf-go-problems "etaf-go" ())
 (declare-function etaf-go-close "etaf-go" (&optional buffer))
 
 (defconst etaf-go--light-theme
@@ -583,17 +586,24 @@ estimate on empty points."
 (defun etaf-go--mode-name (mode)
   "Return the Chinese name of MODE."
   (pcase mode
+    ('play "对弈")
     ('practice "死活")
     ('study "研究")
     ('edit "编辑")
     (_ "打谱")))
 
-(defun etaf-go--turn-text (position mode practice-color &optional edit-tool)
+(defun etaf-go--turn-text (position mode practice-color
+                                    &optional edit-tool game-over)
   "Describe whose turn it is in POSITION for MODE.
-EDIT-TOOL is the active edit tool in edit mode."
+EDIT-TOOL is the active edit tool in edit mode.  GAME-OVER, when
+non-nil, replaces the turn line with the finished game's result."
   (let ((to-play (plist-get position :to-play)))
     (cond
      ((plist-get position :error) "棋谱回放中断")
+     ((eq mode 'play)
+      (or game-over
+          (format "%s棋行棋 · 本地对弈"
+                  (etaf-go--color-name to-play))))
      ((eq mode 'practice)
       (format "轮到你 · 执%s"
               (etaf-go--color-name (or practice-color to-play))))
@@ -634,6 +644,14 @@ EDIT-TOOL is the active edit tool in edit mode."
       (if (< amount 0.05)
           (concat head " · 和棋")
         (format "%s · %s胜%.1f目" head leader amount)))))
+
+(defun etaf-go--score-result (score)
+  "Return a Chinese result string for area SCORE."
+  (let ((margin (plist-get score :margin)))
+    (cond
+     ((> margin 0.05) (format "黑胜 %.1f 目" margin))
+     ((< margin -0.05) (format "白胜 %.1f 目" (- margin)))
+     (t "和棋"))))
 
 (defun etaf-go--path-moves (path size)
   "Return the moves on PATH as entries with their SGF prefixes."
@@ -742,22 +760,33 @@ EDIT-TOOL is the active edit tool in edit mode."
       (setf (etaf-value path-ref) path
             (etaf-value hint-ref) "已回到上一手"))))
 
-(defun etaf-go--undo (mode-ref path-ref hint-ref practice-color size)
+(defun etaf-go--undo (mode-ref path-ref dirty-ref hint-ref practice-color
+                              size game-over-ref pass-count-ref play-start-ref)
   "Undo one move appropriate to the current mode."
   (pcase (etaf-value mode-ref)
     ('practice
      (etaf-go--practice-undo path-ref hint-ref practice-color size))
+    ('play
+     (etaf-go--play-undo path-ref dirty-ref hint-ref game-over-ref
+                         pass-count-ref play-start-ref size))
     (_ (etaf-go--pop-path path-ref hint-ref))))
 
-(defun etaf-go--reset (mode-ref path-ref hint-ref practice-start root)
+(defun etaf-go--reset (mode-ref path-ref dirty-ref hint-ref practice-start
+                               root game-over-ref pass-count-ref play-start-ref
+                               show-score-ref)
   "Return to the starting position of the current mode."
-  (pcase (etaf-value mode-ref)
-    ('replay
-     (setf (etaf-value path-ref) (list root)))
-    (_
-     (setf (etaf-value path-ref)
-           (copy-sequence (etaf-value practice-start)))))
-  (setf (etaf-value hint-ref) "已重置"))
+  (let ((mode (etaf-value mode-ref)))
+    (pcase mode
+      ('play
+       (etaf-go--play-restart path-ref dirty-ref hint-ref game-over-ref
+                              pass-count-ref play-start-ref show-score-ref))
+      ('replay
+       (setf (etaf-value path-ref) (list root)))
+      (_
+       (setf (etaf-value path-ref)
+             (copy-sequence (etaf-value practice-start)))))
+    (unless (eq mode 'play)
+      (setf (etaf-value hint-ref) "已重置"))))
 
 (defun etaf-go--end (path-ref hint-ref root)
   "Follow the main line to its last node."
@@ -851,27 +880,174 @@ The node carries the private `EG' property so practice mode ignores it."
                       (etaf-go--color-name color)
                       (etaf-go--point-name size point)))))))
 
-(defun etaf-go--pass-command (mode-ref path-ref dirty-ref hint-ref position size)
-  "Pass a turn in study mode; explain why other modes cannot."
-  (if (eq (etaf-value mode-ref) 'study)
-      (let* ((state (etaf-value position))
-             (color (plist-get state :to-play))
-             (path (etaf-value path-ref))
-             (parent (car (last path)))
-             (node (etaf-go--study-node color 'pass size)))
-        (setf (etaf-go--node-children parent)
-              (append (etaf-go--node-children parent) (list node)))
-        (setf (etaf-value path-ref) (append path (list node))
-              (etaf-value dirty-ref) t
-              (etaf-value hint-ref)
-              (format "%s 停一手（已写入棋谱，u 撤销）"
-                      (etaf-go--color-name color))))
-    (setf (etaf-value hint-ref) "只有研究模式可以停一手")))
+(defun etaf-go--move-node (color point size)
+  "Return a plain SGF node for a played move of COLOR at POINT."
+  (etaf-go--make-node
+   :props (list (cons (if (= color etaf-go--black) "B" "W")
+                      (list (etaf-go--sgf-coord size point))))))
 
-(defun etaf-go--press (mode-ref path-ref dirty-ref hint-ref
-                                practice-color edit-tool size position point)
+(defun etaf-go--trailing-passes (path size)
+  "Count consecutive pass moves at the end of PATH on a SIZE board."
+  (let ((count 0)
+        (nodes (reverse path)))
+    (while (and nodes
+                (let ((move (etaf-go--node-move (car nodes) size)))
+                  (and move (eq (plist-get move :point) 'pass))))
+      (cl-incf count)
+      (setq nodes (cdr nodes)))
+    count))
+
+(defun etaf-go--play-press (path-ref dirty-ref hint-ref game-over-ref
+                                     pass-count-ref size position point)
+  "Play POINT for the side to move in a local game.
+PATH-REF, DIRTY-REF and HINT-REF are the application refs.  GAME-OVER-REF
+blocks moves after the result, and PASS-COUNT-REF resets on a move."
+  (if (etaf-value game-over-ref)
+      (setf (etaf-value hint-ref)
+            "对局已结束；u 撤销上一手，或 M-x etaf-go-play 新开一局")
+    (let* ((state (etaf-value position))
+           (color (plist-get state :to-play))
+           (result (etaf-go--play (plist-get state :board) size color
+                                  point (plist-get state :ko))))
+      (if (not (plist-get result :ok))
+          (setf (etaf-value hint-ref) (plist-get result :reason))
+        (let* ((path (etaf-value path-ref))
+               (parent (car (last path)))
+               (node (etaf-go--move-node color point size)))
+          (setf (etaf-go--node-children parent)
+                (append (etaf-go--node-children parent) (list node)))
+          (setf (etaf-value path-ref) (append path (list node))
+                (etaf-value dirty-ref) t
+                (etaf-value pass-count-ref) 0
+                (etaf-value hint-ref)
+                (format "%s %s"
+                        (etaf-go--color-name color)
+                        (etaf-go--point-name size point))))))))
+
+(defun etaf-go--play-pass (path-ref dirty-ref hint-ref game-over-ref
+                                    pass-count-ref show-score-ref
+                                    size position)
+  "Pass in a local game; two consecutive passes end it."
+  (if (etaf-value game-over-ref)
+      (setf (etaf-value hint-ref) "对局已经结束")
+    (let* ((state (etaf-value position))
+           (color (plist-get state :to-play))
+           (path (etaf-value path-ref))
+           (parent (car (last path)))
+           (node (etaf-go--move-node color 'pass size))
+           (new-path (append path (list node)))
+           (passes (1+ (or (etaf-value pass-count-ref) 0))))
+      (setf (etaf-go--node-children parent)
+            (append (etaf-go--node-children parent) (list node)))
+      (setf (etaf-value path-ref) new-path
+            (etaf-value dirty-ref) t
+            (etaf-value pass-count-ref) passes
+            (etaf-value hint-ref)
+            (format "%s 停一手" (etaf-go--color-name color)))
+      (when (>= passes 2)
+        (let* ((root (car new-path))
+               (after (etaf-go--position size root new-path))
+               (score (etaf-go--score (plist-get after :board) size
+                                      (etaf-go--komi root)))
+               (result (etaf-go--score-result score)))
+          (setf (etaf-value game-over-ref) result
+                (etaf-value show-score-ref) t
+                (etaf-value hint-ref)
+                (format "双方停一手，对局结束：%s" result))
+          (setf (etaf-value path-ref) (copy-sequence new-path)))))))
+
+(defun etaf-go--play-resign (hint-ref game-over-ref position)
+  "Resign the game for the side to move."
+  (if (etaf-value game-over-ref)
+      (setf (etaf-value hint-ref) "对局已经结束")
+    (let* ((state (etaf-value position))
+           (color (plist-get state :to-play))
+           (winner (etaf-go--opponent color))
+           (name (etaf-go--color-name winner)))
+      (when (etaf-confirm-dialog
+             (format "%s 认输，判定%s中盘胜？"
+                     (etaf-go--color-name color) name))
+        (setf (etaf-value game-over-ref) (format "%s中盘胜" name)
+              (etaf-value hint-ref)
+              (format "%s认输，%s中盘胜"
+                      (etaf-go--color-name color) name))))))
+
+(defun etaf-go--play-undo (path-ref dirty-ref hint-ref game-over-ref
+                                    pass-count-ref play-start-ref size)
+  "Remove the last move of the current local game."
+  (let ((path (etaf-value path-ref))
+        (start (etaf-value play-start-ref)))
+    (if (<= (length path) (length start))
+        (setf (etaf-value hint-ref) "已经是对局开始")
+      (let* ((parent (nth (- (length path) 2) path))
+             (node (car (last path)))
+             (move (etaf-go--node-move node size))
+             (new-path (butlast path)))
+        (setf (etaf-go--node-children parent)
+              (cl-remove-if (lambda (child) (eq child node))
+                            (etaf-go--node-children parent)))
+        (setf (etaf-value path-ref) new-path
+              (etaf-value dirty-ref) t
+              (etaf-value game-over-ref) nil
+              (etaf-value pass-count-ref)
+              (etaf-go--trailing-passes new-path size)
+              (etaf-value hint-ref)
+              (format "已撤销：%s %s"
+                      (etaf-go--color-name (plist-get move :color))
+                      (etaf-go--point-name size (plist-get move :point))))))))
+
+(defun etaf-go--play-restart (path-ref dirty-ref hint-ref game-over-ref
+                                       pass-count-ref play-start-ref
+                                       show-score-ref)
+  "Discard the moves played from PLAY-START-REF and restart the game."
+  (let ((path (etaf-value path-ref))
+        (start (etaf-value play-start-ref)))
+    (if (<= (length path) (length start))
+        (setf (etaf-value hint-ref) "已经是对局开始")
+      (when (etaf-confirm-dialog "重新开始这一局？")
+        (let ((parent (car (last start)))
+              (child (nth (length start) path)))
+          (setf (etaf-go--node-children parent)
+                (cl-remove-if (lambda (candidate) (eq candidate child))
+                              (etaf-go--node-children parent))))
+        (setf (etaf-value path-ref) (copy-sequence start)
+              (etaf-value game-over-ref) nil
+              (etaf-value pass-count-ref) 0
+              (etaf-value show-score-ref) nil
+              (etaf-value dirty-ref) t
+              (etaf-value hint-ref) "重新开始")))))
+
+(defun etaf-go--pass-command (mode-ref path-ref dirty-ref hint-ref position size
+                                       game-over-ref pass-count-ref show-score-ref)
+  "Pass in a local game or study; explain why other modes cannot."
+  (pcase (etaf-value mode-ref)
+    ('play
+     (etaf-go--play-pass path-ref dirty-ref hint-ref game-over-ref
+                         pass-count-ref show-score-ref size position))
+    ('study
+     (let* ((state (etaf-value position))
+            (color (plist-get state :to-play))
+            (path (etaf-value path-ref))
+            (parent (car (last path)))
+            (node (etaf-go--study-node color 'pass size)))
+       (setf (etaf-go--node-children parent)
+             (append (etaf-go--node-children parent) (list node)))
+       (setf (etaf-value path-ref) (append path (list node))
+             (etaf-value dirty-ref) t
+             (etaf-value hint-ref)
+             (format "%s 停一手（已写入棋谱，u 撤销）"
+                     (etaf-go--color-name color)))))
+    (_
+     (setf (etaf-value hint-ref) "只有对弈或研究模式可以停一手"))))
+
+(defun etaf-go--press (mode-ref path-ref dirty-ref hint-ref practice-color
+                                edit-tool game-over-ref pass-count-ref
+                                size position point)
   "Handle a board press at POINT according to the current mode."
   (pcase (etaf-value mode-ref)
+    ('play
+     (etaf-go--play-press path-ref dirty-ref hint-ref game-over-ref
+                          pass-count-ref size position point))
     ('practice
      (etaf-go--practice-press path-ref hint-ref practice-color size point))
     ('study
@@ -971,10 +1147,13 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
 (defun etaf-go--delete-branch (mode-ref path-ref dirty-ref hint-ref)
   "Remove the last node of the current path from the record."
   (let ((path (etaf-value path-ref)))
-    (if (or (eq (etaf-value mode-ref) 'practice) (<= (length path) 1))
+    (if (or (memq (etaf-value mode-ref) '(practice play))
+            (<= (length path) 1))
         (setf (etaf-value hint-ref)
-              (if (eq (etaf-value mode-ref) 'practice)
-                  "死活模式下不能删除分支" "已经是开局，没有可删除的分支"))
+              (pcase (etaf-value mode-ref)
+                ('practice "死活模式下不能删除分支")
+                ('play "对弈模式请用 u 撤销")
+                (_ "已经是开局，没有可删除的分支")))
       (let* ((parent (nth (- (length path) 2) path))
              (node (car (last path)))
              (label (etaf-go--node-name node)))
@@ -1085,25 +1264,31 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
     (when (and file (file-regular-p file))
       (let ((old (current-buffer))
             (practice (eq (etaf-value mode-ref) 'practice)))
-        (etaf-next-tick
+        (run-at-time
+         0 nil
          (lambda ()
-            (etaf-go--open-file file practice)
-            (when (and (buffer-live-p old)
-                       (etaf-go--session-p (etaf-app-state old))
-                       (or (not (etaf-value dirty-ref))
-                           (etaf-confirm-dialog "当前棋谱有未保存的改动，关闭？")))
-              (etaf-go-close old))))))))
+           (etaf-go--open-file file practice)
+           (when (and (buffer-live-p old)
+                      (etaf-go--session-p (etaf-app-state old))
+                      (or (not (etaf-value dirty-ref))
+                          (etaf-confirm-dialog
+                           "当前棋谱有未保存的改动，关闭？")))
+             (etaf-go-close old))))))))
 
-(defun etaf-go--new-record (dirty-ref)
-  "Read a board size and open a new empty record, confirming unsaved work."
+(defun etaf-go--new-record (dirty-ref &optional play)
+  "Read a board size and open a new record, confirming unsaved work.
+With PLAY non-nil start a new local game instead of an editor record."
   (let ((size (etaf-call-with-input (lambda () (read-number "棋盘大小: " 19)))))
     (when (and (integerp size) (<= 2 size 25)
                (or (not (etaf-value dirty-ref))
-                   (etaf-confirm-dialog "当前棋谱有未保存的改动，新建？")))
+                   (etaf-confirm-dialog
+                    (if play "当前对局未保存，新开一局？"
+                      "当前棋谱有未保存的改动，新建？"))))
       (let ((old (current-buffer)))
-        (etaf-next-tick
+        (run-at-time
+         0 nil
          (lambda ()
-           (etaf-go-new size)
+           (if play (etaf-go-play size) (etaf-go-new size))
            (when (and (buffer-live-p old)
                       (etaf-go--session-p (etaf-app-state old)))
              (etaf-go-close old))))))))
@@ -1135,6 +1320,9 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
    (practice-color
     (etaf-ref (or (etaf-go--solution-color root size)
                   (etaf-go--initial-to-play root))))
+   (play-start (etaf-ref (list root)))
+   (game-over (etaf-ref nil))
+   (pass-count (etaf-ref 0))
    (hint (etaf-ref nil))
    (dirty (etaf-ref nil))
    (show-numbers (etaf-ref nil))
@@ -1209,7 +1397,9 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
     :color (etaf-go--color :ui-fg)
     :aria-label "围棋"
     :on-dismiss (lambda () (setf (etaf-value variations-open) nil))
-    :help '("打谱用 n/p 前后翻页，G 跳到末手，v 选择变化。"
+    :help '("对弈是本地双人：点击棋盘轮流落子，s 停一手，R 认输，u 撤销。"
+            "双方连续停一手后结束，自动显示数子结果；r 重新开始这一局。"
+            "打谱用 n/p 前后翻页，G 跳到末手，v 选择变化。"
             "死活练习中点击棋盘作答，n 提示下一步，答错不会落子。"
             "研究模式点击棋盘落子，分支直接写入棋谱：u 撤销，s 停一手，x 删除分支。"
             "e 进入编辑模式：先选工具再点棋盘，可摆黑/白子、擦除、加三角/方块/圆圈/叉或标签；"
@@ -1225,12 +1415,14 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             "下一手")
       (list "p"
             (lambda ()
-              (etaf-go--undo mode path hint
-                             (etaf-value practice-color) size))
+              (etaf-go--undo mode path dirty hint
+                             (etaf-value practice-color) size
+                             game-over pass-count play-start))
             "上一手")
       (list "g"
             (lambda ()
-              (etaf-go--reset mode path hint practice-start root))
+              (etaf-go--reset mode path dirty hint practice-start root
+                              game-over pass-count play-start show-score))
             "开局")
       (list "G"
             (lambda ()
@@ -1245,18 +1437,23 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             "切换模式")
       (list "e"
             (lambda ()
-              (setf (etaf-value mode) 'edit
-                    (etaf-value hint)
-                    "编辑模式：选工具后点击棋盘改动摆子/标记；P 行棋方；w 保存"))
+              (if (eq (etaf-value mode) 'play)
+                  (setf (etaf-value hint)
+                        "对弈模式不能编辑；保存后可用编辑模式打开")
+                (setf (etaf-value mode) 'edit
+                      (etaf-value hint)
+                      "编辑模式：选工具后点击棋盘改动摆子/标记；P 行棋方；w 保存")))
             "编辑模式")
       (list "u"
             (lambda ()
-              (etaf-go--undo mode path hint
-                             (etaf-value practice-color) size))
+              (etaf-go--undo mode path dirty hint
+                             (etaf-value practice-color) size
+                             game-over pass-count play-start))
             "撤销")
       (list "r"
             (lambda ()
-              (etaf-go--reset mode path hint practice-start root))
+              (etaf-go--reset mode path dirty hint practice-start root
+                              game-over pass-count play-start show-score))
             "重来")
       (list "v"
             (lambda ()
@@ -1298,8 +1495,13 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             "主题")
       (list "s"
             (lambda ()
-              (etaf-go--pass-command mode path dirty hint position size))
+              (etaf-go--pass-command mode path dirty hint position size
+                                     game-over pass-count show-score))
             "停一手")
+      (list "R"
+            (lambda ()
+              (etaf-go--play-resign hint game-over position))
+            "认输")
       (list "c"
             (lambda ()
               (etaf-go--open-comment comment-open comment-draft
@@ -1318,7 +1520,11 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               (etaf-go--save-command session dirty hint t))
             "另存为")
       (list "o" (lambda () (etaf-go--load mode dirty)) "打开棋谱")
-      (list "N" (lambda () (etaf-go--new-record dirty)) "新建棋谱")
+      (list "N"
+            (lambda ()
+              (etaf-go--new-record dirty
+                                   (eq (etaf-value mode) 'play)))
+            "新建")
       (list "<f1>" #'etaf-help "帮助")
       (list "q" (lambda () (etaf-go--maybe-close dirty)) "关闭"))
     (box :flex-grow 1 :flex-basis '(lh 0) :min-height '(lh 0))
@@ -1351,7 +1557,7 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               (lambda (row column)
                 (etaf-go--press mode path dirty hint
                                 (etaf-value practice-color)
-                                edit-tool
+                                edit-tool game-over pass-count
                                 size position (+ (* row size) column)))))
           (flex :if (eq (etaf-value mode) 'edit)
             :width 'stretch :justify-content 'center
@@ -1384,6 +1590,7 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               (expr (or (etaf-value hint)
                         (etaf-go--last-line (etaf-value position) size)
                         (pcase (etaf-value mode)
+                          ('play "轮流落子 · s 停一手 · R 认输 · u 撤销")
                           ('practice "点击棋盘作答 · n 提示 · r 重来")
                           ('edit "选工具后点棋盘 · P 行棋方 · w 保存")
                           (_ "n/p 翻页 · m 切换模式 · ? 帮助"))))))
@@ -1398,6 +1605,7 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             (etaf-button :label "编辑" :ref 'go-edit
               :variant (if (eq (etaf-value mode) 'edit) 'secondary 'ghost)
               :aria-selected (eq (etaf-value mode) 'edit)
+              :disabled (eq (etaf-value mode) 'play)
               :on-press
               (lambda ()
                 (if (eq (etaf-value mode) 'edit)
@@ -1433,12 +1641,14 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             (etaf-button :label "开局" :ref 'go-start :variant 'ghost
               :on-press
               (lambda ()
-                (etaf-go--reset mode path hint practice-start root)))
+                (etaf-go--reset mode path dirty hint practice-start root
+                                game-over pass-count play-start show-score)))
             (etaf-button :label "上一手" :ref 'go-prev :variant 'ghost
               :on-press
               (lambda ()
-                (etaf-go--undo mode path hint
-                               (etaf-value practice-color) size)))
+                (etaf-go--undo mode path dirty hint
+                               (etaf-value practice-color) size
+                               game-over pass-count play-start)))
             (etaf-button :label "下一手" :ref 'go-next :variant 'ghost
               :on-press
               (lambda ()
@@ -1463,14 +1673,18 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               (lambda ()
                 (etaf-go--save-command session dirty hint)))
             (etaf-button :label "新建" :ref 'go-new :variant 'ghost
-              :on-press (lambda () (etaf-go--new-record dirty)))
+              :on-press
+              (lambda ()
+                (etaf-go--new-record dirty
+                                     (eq (etaf-value mode) 'play))))
             (etaf-button :label "打开" :ref 'go-open :variant 'ghost
               :on-press (lambda () (etaf-go--load mode dirty)))
             (etaf-button :label "停一手" :ref 'go-pass :variant 'ghost
-              :disabled (not (eq (etaf-value mode) 'study))
+              :disabled (not (memq (etaf-value mode) '(play study)))
               :on-press
               (lambda ()
-                (etaf-go--pass-command mode path dirty hint position size)))
+                (etaf-go--pass-command mode path dirty hint position size
+                                       game-over pass-count show-score)))
             (etaf-button :label "帮助" :ref 'go-help :variant 'ghost
               :on-press #'etaf-help)
             (etaf-button :label "关闭" :ref 'go-close :variant 'ghost
@@ -1484,7 +1698,14 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             (expr (etaf-go--turn-text (etaf-value position)
                                       (etaf-value mode)
                                       (etaf-value practice-color)
-                                      (etaf-value edit-tool))))
+                                      (etaf-value edit-tool)
+                                      (etaf-value game-over))))
+          (etaf-button :if (and (eq (etaf-value mode) 'play)
+                                (not (etaf-value game-over)))
+            :label "认输" :ref 'go-resign :variant 'ghost
+            :on-press
+            (lambda ()
+              (etaf-go--play-resign hint game-over position)))
           (etaf-label :if (not (string-empty-p (etaf-go--session-info session)))
             :text (truncate-string-to-width
                    (etaf-go--session-info session) 32 nil nil "…")
@@ -1560,6 +1781,111 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
               (etaf-go--submit-comment path comment-open comment-draft
                                        dirty hint
                                        (car (last (etaf-value path)))))))))))
+
+(defun etaf-go--home-close ()
+  "Close the main menu."
+  (interactive)
+  (etaf-app-close (current-buffer)))
+
+(defun etaf-go--home-run (function)
+  "Run FUNCTION from the main menu, then close the menu.
+FUNCTION runs just after the event so it may read from the minibuffer and
+replace application buffers without closing one inside ETAF's event drain."
+  (let ((home (current-buffer)))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (funcall function)
+       (when (and (buffer-live-p home)
+                  (eq (etaf-app-state home) 'home))
+         (etaf-app-close home))))))
+
+(defun etaf-go--home-open ()
+  "Open or raise the Go main menu and return its buffer."
+  (let* ((existing (get-buffer "*Go*"))
+         (name (if (and existing
+                        (not (eq (etaf-app-state existing) 'home)))
+                   (generate-new-buffer-name "*Go*")
+                 "*Go*"))
+         (buffer (get-buffer name)))
+    (if (and buffer (eq (etaf-app-state buffer) 'home))
+        (progn
+          (pop-to-buffer buffer)
+          buffer)
+      (etaf-app-open name
+                     (etaf-view (etaf-go--home-app))
+                     :state 'home
+                     :cursor nil
+                     :on-fit (lambda (_window)
+                               (setq-local line-spacing nil))
+                     :on-close (lambda () nil))
+      (get-buffer name))))
+
+(etaf-define-component etaf-go--home-app ()
+  "Render the Go main menu."
+  :bindings
+  ((appearance
+    (etaf-ref (if (eq (bound-and-true-p etaf-go-appearance) 'auto)
+                  (if (eq (frame-parameter nil 'background-mode) 'dark)
+                      'dark 'light)
+                (or (bound-and-true-p etaf-go-appearance) 'light))))
+   (theme
+    (etaf-computed
+     (lambda ()
+       (if (eq (etaf-value appearance) 'dark)
+           etaf-go--dark-theme
+         etaf-go--light-theme))
+     :test #'equal)))
+  :setup
+  (progn (etaf-theme-provide theme) nil)
+  :view
+  (flex :width 'stretch :height 'stretch :flex-direction 'column
+    :background-color (etaf-go--color :ui-bg)
+    :color (etaf-go--color :ui-fg)
+    :aria-label "围棋主界面"
+    :help '("对弈是本地双人轮流落子；打谱、死活题和编辑摆题各自独立。"
+            "本包不设置全局按键，请从 M-x 或你自己的配置启动。")
+    :keys
+    (list
+      (list "q" #'etaf-go--home-close "关闭")
+      (list "<f1>" #'etaf-help "帮助"))
+    (box :flex-grow 1)
+    (flex :justify-content 'center :align-items 'flex-start
+      :padding '((lh 2) (ch 2))
+      (column :width '(ch 58) :item-gap '(lh 1)
+        (etaf-label :text "围棋" :variant 'strong)
+        (etaf-label :text "本地对弈 · 打谱 · 死活题 · 编辑摆题" :variant 'muted)
+        (etaf-label :text "对弈（本地双人）" :variant 'muted)
+        (flex :width 'stretch :justify-content 'center
+          (etaf-button :label "9 路" :ref 'go-home-play-9
+            :on-press
+            (lambda ()
+              (etaf-go--home-run (lambda () (etaf-go-play 9)))))
+          (etaf-button :label "13 路" :ref 'go-home-play-13
+            :on-press
+            (lambda ()
+              (etaf-go--home-run (lambda () (etaf-go-play 13)))))
+          (etaf-button :label "19 路" :ref 'go-home-play-19
+            :on-press
+            (lambda ()
+              (etaf-go--home-run (lambda () (etaf-go-play 19))))))
+        (etaf-label :text "棋谱与题目" :variant 'muted)
+        (flex :width 'stretch :justify-content 'center
+          (etaf-button :label "打开棋谱" :ref 'go-home-open
+            :on-press
+            (lambda () (etaf-go--home-run #'etaf-go-open-file)))
+          (etaf-button :label "死活题" :ref 'go-home-problems
+            :on-press
+            (lambda () (etaf-go--home-run #'etaf-go-problems)))
+          (etaf-button :label "新建棋谱" :ref 'go-home-new
+            :on-press
+            (lambda ()
+              (etaf-go--home-run
+               (lambda () (call-interactively #'etaf-go-new))))))
+        (flex :width 'stretch :justify-content 'center
+          (etaf-button :label "关闭" :ref 'go-home-close :variant 'ghost
+            :on-press #'etaf-go--home-close))))
+    (box :flex-grow 1)))
 
 (provide 'etaf-go-view)
 ;;; etaf-go-view.el ends here

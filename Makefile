@@ -1,7 +1,7 @@
 EMACS ?= $(shell command -v emacs 2>/dev/null || echo /Applications/Emacs.app/Contents/MacOS/Emacs)
 PACKAGE_DIR ?= $(HOME)/.emacs.d/elpa
 LOAD = -L . -L test
-INIT = --eval "(progn (require 'package) (setq package-user-dir \"$(PACKAGE_DIR)\") (package-initialize))"
+INIT = --eval "(progn (require 'package) (setq package-user-dir \"$(PACKAGE_DIR)\") (package-initialize) (push \"$(CURDIR)\" load-path) (setq load-prefer-newer t))"
 MODULES = etaf-go-rules.el etaf-go-sgf.el etaf-go-view.el
 
 .PHONY: compile test check smoke lint clean
@@ -18,7 +18,7 @@ check: compile test
 
 smoke:
 	$(EMACS) -Q --batch $(LOAD) $(INIT) \
-	  --eval "(progn (require 'etaf-go) (let ((b (etaf-go-demo))) (message \"demo: %d bytes\" (buffer-size b)) (etaf-go-close b)))"
+	  --eval "(progn (require 'etaf-go) (let ((b (etaf-go))) (message \"home: %d bytes\" (buffer-size b)) (etaf-go-close b)))"
 
 lint:
 	@if command -v eldev >/dev/null 2>&1; then eldev lint; \
