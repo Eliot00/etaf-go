@@ -655,5 +655,67 @@
                      (etaf-app-state candidate))
             (etaf-go-close candidate)))))))
 
+(ert-deftest etaf-go-view-practice-accepts-every-answer ()
+  "Any sibling solution move is accepted as a correct answer."
+  (let* ((node (etaf-go--sgf-parse
+                "(;GM[1]SZ[9]AB[de][fe][ed]AW[ee](;B[ef])(;B[dd]))"))
+         (path (etaf-ref (list node)))
+         (hint (etaf-ref nil)))
+    (should (= (length (etaf-go--practice-children node)) 2))
+    (etaf-go--practice-press path hint etaf-go--black 9 (+ (* 5 9) 4))
+    (should (string-match-p "正解" (etaf-value hint)))
+    (should (= (length (etaf-value path)) 2))
+    (setf (etaf-value path) (list node))
+    (etaf-go--practice-press path hint etaf-go--black 9 (+ (* 3 9) 3))
+    (should (string-match-p "正解" (etaf-value hint)))
+    (should (equal (etaf-go--node-move (car (last (etaf-value path))) 9)
+                   (list :color etaf-go--black :point (+ (* 3 9) 3))))))
+
+(ert-deftest etaf-go-view-practice-rejects-failure-lines ()
+  "A branch commented as a failure is not accepted and is not followed."
+  (let* ((text (concat "(;GM[1]SZ[9]AB[de][fe][ed]AW[ee]"
+                       "(;B[ef]C[正解])(;B[dd]C[失败，白棋做活])"
+                       ")"))
+         (node (etaf-go--sgf-parse text))
+         (path (etaf-ref (list node)))
+         (hint (etaf-ref nil)))
+    (should (= (length (etaf-go--practice-children node)) 1))
+    (etaf-go--practice-press path hint etaf-go--black 9 (+ (* 3 9) 3))
+    (should (string-match-p "不是正解" (etaf-value hint)))
+    (should (= (length (etaf-value path)) 1))
+    (etaf-go--practice-press path hint etaf-go--black 9 (+ (* 5 9) 5))
+    (should (string-match-p "正解" (etaf-value hint)))))
+
+(ert-deftest etaf-go-view-practice-comment-marks ()
+  "Comment words classify a branch as right, wrong or unmarked."
+  (let ((node (etaf-go--sgf-parse "(;GM[1]SZ[9])")))
+    (etaf-go--set-prop node "C" (list "正解，黑棋提子"))
+    (should (eq (etaf-go--comment-mark node) 'right))
+    (etaf-go--set-prop node "C" (list "黑棋正解"))
+    (should (eq (etaf-go--comment-mark node) 'right))
+    (etaf-go--set-prop node "C" (list "失败：白棋活出"))
+    (should (eq (etaf-go--comment-mark node) 'wrong))
+    (etaf-go--set-prop node "C" (list "黑失败，白棋做活"))
+    (should (eq (etaf-go--comment-mark node) 'wrong))
+    (etaf-go--set-prop node "C" (list "不正确，这里不入气"))
+    (should (eq (etaf-go--comment-mark node) 'wrong))
+    (etaf-go--set-prop node "C" (list "Correct answer"))
+    (should (eq (etaf-go--comment-mark node) 'right))
+    (etaf-go--set-prop node "C" (list "正解；否则失败"))
+    (should (eq (etaf-go--comment-mark node) 'right))
+    (etaf-go--set-prop node "C" (list "这里只是说明"))
+    (should-not (etaf-go--comment-mark node))
+    (etaf-go--set-prop node "C" nil)
+    (should-not (etaf-go--comment-mark node))))
+
+(ert-deftest etaf-go-view-practice-hint-names-multiple-answers ()
+  "The hint notes that more answers exist when the line finishes."
+  (let* ((node (etaf-go--sgf-parse "(;GM[1]SZ[9](;B[ef])(;B[dd]))"))
+         (path (etaf-ref (list node)))
+         (hint (etaf-ref nil)))
+    (etaf-go--practice-next path hint etaf-go--black 9)
+    (should (= (length (etaf-value path)) 2))
+    (should (string-match-p "还有别的正解" (etaf-value hint)))))
+
 (provide 'etaf-go-view-test)
 ;;; etaf-go-view-test.el ends here

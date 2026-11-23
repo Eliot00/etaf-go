@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.3.2
+;; Version: 0.3.3
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.1") (etaf-ui "0.3.0"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go

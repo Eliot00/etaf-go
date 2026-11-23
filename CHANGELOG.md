@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3
+
+- Practice accepts every recorded first move at a node, so a problem with
+  several solutions no longer rejects valid answers.
+- Variations whose comment contains 失败/错误/不正确/不行/不是正解/俗手/坏棋/无理
+  (or wrong/failure/incorrect) are treated as failure lines instead of
+  answers.  Hints and automatic replies skip them; the sidebar shows how many
+  answers a node has.
+- A comment containing both kinds of word is classified by the earlier
+  occurrence, so "正解；否则失败" stays a correct answer.
+
 ## 0.3.2
 
 - The application canvas fills the frame; spare width and height go to the

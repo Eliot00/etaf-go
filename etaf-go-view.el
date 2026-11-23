@@ -806,12 +806,13 @@ non-nil, replaces the turn line with the finished game's result."
           (etaf-value hint-ref) "已到末手")))
 
 (defun etaf-go--auto-reply (path-ref user-color size)
-  "Follow the SGF's replies until the next move of USER-COLOR."
+  "Follow the SGF's replies until the next move of USER-COLOR.
+Only branches that are not marked as failure lines are followed."
   (when user-color
     (let ((guard 0))
       (while (and (< guard 512)
                   (let* ((node (car (last (etaf-value path-ref))))
-                         (children (etaf-go--solution-children node))
+                         (children (etaf-go--practice-children node))
                          (child (car children)))
                     (cond
                      ((null child) nil)
@@ -827,13 +828,57 @@ non-nil, replaces the turn line with the finished game's result."
                      (t nil))))
         (cl-incf guard)))))
 
+(defconst etaf-go--right-comment-pattern
+  "\\(正解\\|正确\\|妙手\\|好手\\|correct\\|solution\\)"
+  "Words marking a variation as a correct answer.
+Many problem collections keep alternative answers and failure lines as
+siblings; a comment containing one of these words says which is which.
+When a comment holds both kinds of word, the earlier occurrence wins, so
+\"正解；否则失败\" stays a correct answer and \"失败，不是正解\" stays wrong.")
+
+(defconst etaf-go--wrong-comment-pattern
+  "\\(失败\\|错误\\|不正确\\|不行\\|不是正解\\|俗手\\|坏棋\\|无理\\|wrong\\|failure\\|incorrect\\)"
+  "Words marking a variation as a failure line.")
+
+(defun etaf-go--comment-mark (node)
+  "Return `right', `wrong' or nil according to NODE's comment."
+  (let* ((text (or (etaf-go--prop1 node "C") ""))
+         (right (and (string-match etaf-go--right-comment-pattern text)
+                     (match-beginning 0)))
+         (wrong (and (string-match etaf-go--wrong-comment-pattern text)
+                     (match-beginning 0))))
+    (cond
+     ((and right (or (null wrong) (< right wrong))) 'right)
+     (wrong 'wrong)
+     (t nil))))
+
+(defun etaf-go--practice-children (node)
+  "Return NODE's solution children that may count as answers.
+Children marked as failure lines are dropped.  When any child is marked
+as a correct answer, only those remain, so an imported set that stores
+both answers and failures is judged correctly.  Without any marking the
+unmarked children are kept, which still accepts several first moves."
+  (let* ((children (etaf-go--solution-children node))
+         (marked (cl-remove-if-not
+                  (lambda (child) (eq (etaf-go--comment-mark child) 'right))
+                  children)))
+    (if marked
+        marked
+      (cl-remove-if (lambda (child) (eq (etaf-go--comment-mark child) 'wrong))
+                    children))))
+
+(defun etaf-go--practice-done-p (node)
+  "Return non-nil when NODE has no answer left in practice."
+  (null (etaf-go--practice-children node)))
+
 (defun etaf-go--practice-press (path-ref hint-ref practice-color size point)
-  "Check a practice move at POINT against the current SGF node."
+  "Check a practice move at POINT against the current SGF node.
+Every answer for the same first move is accepted."
   (etaf-go--advance-transparent path-ref size)
   (let* ((path (etaf-value path-ref))
          (node (car (last path)))
          (color (or practice-color etaf-go--black))
-         (children (etaf-go--solution-children node))
+         (children (etaf-go--practice-children node))
          (match (cl-find-if
                  (lambda (child)
                    (let ((move (etaf-go--node-move child size)))
@@ -848,8 +893,7 @@ non-nil, replaces the turn line with the finished game's result."
       (setf (etaf-value path-ref) (append path (list match)))
       (etaf-go--auto-reply path-ref color size)
       (setf (etaf-value hint-ref)
-            (if (null (etaf-go--solution-children
-                       (car (last (etaf-value path-ref)))))
+            (if (etaf-go--practice-done-p (car (last (etaf-value path-ref))))
                 "正解完成" "正解！")))
      (t
       (setf (etaf-value hint-ref)
@@ -1064,35 +1108,43 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
            "打谱模式只读：n/p 翻页，m 进入死活练习、研究或编辑模式"))))
 
 (defun etaf-go--practice-next (path-ref hint-ref practice-color size)
-  "Play the SGF's next solution move as a hint."
+  "Play the SGF's next solution move as a hint.
+When several answers exist the hint names how many there are."
   (etaf-go--advance-transparent path-ref size)
   (let* ((path (etaf-value path-ref))
          (node (car (last path)))
-         (children (etaf-go--solution-children node))
-         (color (or practice-color (etaf-go--solution-color node size))))
+         (children (etaf-go--practice-children node))
+         (color (or practice-color (etaf-go--solution-color node size)))
+         (candidates
+          (if color
+              (cl-remove-if-not
+               (lambda (child)
+                 (let ((move (etaf-go--node-move child size)))
+                   (and move (= (plist-get move :color) color))))
+               children)
+            children)))
     (cond
      ((null children)
       (setf (etaf-value hint-ref) "已经是终点了，按 r 重来"))
      (t
-      (let* ((candidate
-              (or (and color
-                       (cl-find-if
-                        (lambda (child)
-                          (let ((move (etaf-go--node-move child size)))
-                            (and move (= (plist-get move :color) color))))
-                        children))
-                   (car children)))
-              (move (etaf-go--node-move candidate size)))
+      (let* ((candidate (or (car candidates) (car children)))
+             (move (etaf-go--node-move candidate size)))
         (setf (etaf-value path-ref) (append path (list candidate)))
         (when move
           (setf (etaf-value hint-ref)
-                (format "提示：%s %s"
+                (format "提示：%s %s%s"
                         (etaf-go--color-name (plist-get move :color))
-                        (etaf-go--point-name size (plist-get move :point)))))
+                        (etaf-go--point-name size (plist-get move :point))
+                        (if (> (length candidates) 1)
+                            (format "（共 %d 个正解，走其中一个）"
+                                    (length candidates))
+                          ""))))
         (etaf-go--auto-reply path-ref color size)
-        (when (null (etaf-go--solution-children
-                     (car (last (etaf-value path-ref)))))
-          (setf (etaf-value hint-ref) "正解完成")))))))
+        (when (etaf-go--practice-done-p (car (last (etaf-value path-ref))))
+          (setf (etaf-value hint-ref)
+                (if (> (length candidates) 1)
+                    "正解完成（还有别的正解）"
+                  "正解完成"))))))))
 
 (defun etaf-go--hint (mode-ref path-ref hint-ref practice-color size)
   "Give a hint, or explain that hints are a practice feature."
@@ -1380,6 +1432,11 @@ With PLAY non-nil start a new local game instead of an editor record."
      (lambda ()
        (etaf-go--child-entries (car (last (etaf-value path))) size))
      :test #'equal))
+   (answers
+    (etaf-computed
+     (lambda ()
+       (length (etaf-go--practice-children (car (last (etaf-value path))))))
+     :test #'eql))
    (comment
     (etaf-computed
      (lambda ()
@@ -1418,6 +1475,7 @@ With PLAY non-nil start a new local game instead of an editor record."
             "双方连续停一手后结束，自动显示数子结果；r 重新开始这一局。"
             "打谱用 n/p 前后翻页，G 跳到末手，v 选择变化。"
             "死活练习中点击棋盘作答，n 提示下一步，答错不会落子。"
+            "同一节点下多个同色同点的子节点都算正解；注释含「失败/不正确」等词的变化按失败图跳过。"
             "研究模式点击棋盘落子，分支直接写入棋谱：u 撤销，s 停一手，x 删除分支。"
             "e 进入编辑模式：先选工具再点棋盘，可摆黑/白子、擦除、加三角/方块/圆圈/叉或标签；"
             "P 切换行棋方。新建棋谱后用编辑模式摆题，再保存成 .sgf。"
@@ -1739,6 +1797,10 @@ With PLAY non-nil start a new local game instead of an editor record."
             :variant 'muted)
           (etaf-label :if (etaf-value score)
             :text (or (etaf-go--score-line (etaf-value score)) "")
+            :variant 'muted)
+          (etaf-label :if (and (eq (etaf-value mode) 'practice)
+                               (> (etaf-value answers) 1))
+            :text (format "此处有 %d 个正解" (etaf-value answers))
             :variant 'muted)
           (etaf-label
            :text (if (eq (etaf-value mode) 'practice)
