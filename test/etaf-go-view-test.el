@@ -717,5 +717,106 @@
     (should (= (length (etaf-value path)) 2))
     (should (string-match-p "还有别的正解" (etaf-value hint)))))
 
+(ert-deftest etaf-go-view-problem-region-local ()
+  "A small problem becomes a local view with a two-point margin."
+  (let ((root (etaf-go--sgf-parse
+               "(;GM[1]SZ[19]AB[dd][ed]AW[de];B[ee];W[fe])")))
+    (should (equal (etaf-go--problem-region (list root) 19)
+                   '(1 1 6 7)))))
+
+(ert-deftest etaf-go-view-problem-region-full ()
+  "Wide problems and empty boards keep the full view."
+  (let ((wide (etaf-go--sgf-parse
+               "(;GM[1]SZ[19]AB[aa][ss]AW[as][sa];B[jj])"))
+        (empty (etaf-go--sgf-parse "(;GM[1]SZ[19])")))
+    (should (equal (etaf-go--problem-region (list wide) 19) '(0 0 19 19)))
+    (should (equal (etaf-go--problem-region (list empty) 19) '(0 0 19 19)))))
+
+(ert-deftest etaf-go-view-problem-region-minimum ()
+  "A single point still gets a readable five-intersection view."
+  (let ((root (etaf-go--sgf-parse "(;GM[1]SZ[19]AB[jj])")))
+    (should (equal (etaf-go--problem-region (list root) 19) '(7 7 5 5)))))
+
+(ert-deftest etaf-go-view-region-grid-points ()
+  "Grid cells map to the visible board points."
+  (should (equal (etaf-go--grid-point 1 1 19 '(2 3 5 4)) '(2 . 3)))
+  (should (equal (etaf-go--grid-point 5 4 19 '(2 3 5 4)) '(6 . 6)))
+  (should-not (etaf-go--grid-point 6 1 19 '(2 3 5 4)))
+  (should-not (etaf-go--grid-point 1 5 19 '(2 3 5 4)))
+  (should (equal (etaf-go--grid-point 1 1 19) '(0 . 0))))
+
+(ert-deftest etaf-go-view-metrics-magnify-local-view ()
+  "A local view gets larger cells than the full board."
+  (let ((etaf-go-cell-lines 'auto))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'etaf-display-metrics)
+               (lambda (&optional _)
+                 '(:char-width 7 :line-height 17 :ascent 80)))
+              ((symbol-function 'etaf-viewport)
+               (lambda (&optional _) (cons 1085 34))))
+      (let ((local (etaf-go--board-metrics 19 '(2 3 7 6)))
+            (full (etaf-go--board-metrics 19)))
+        (should (= (plist-get local :lines) 3))
+        (should (= (plist-get local :columns) 7))
+        (should (= (plist-get local :width) 49))
+        (should (= (plist-get local :height) 51))
+        (should (= (plist-get full :lines) 1))
+        (should (> (plist-get local :width) (plist-get full :width)))))))
+
+(ert-deftest etaf-go-view-toggle-zoom ()
+  "Zoom toggles only in practice on a graphical display."
+  (let* ((mode (etaf-ref 'practice))
+         (zoom (etaf-ref nil))
+         (hint (etaf-ref nil))
+         (root (etaf-go--sgf-parse
+                "(;GM[1]SZ[19]AB[dd][ed]AW[de];B[ee])"))
+         (region (etaf-ref (etaf-go--problem-region (list root) 19))))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+      (etaf-go--toggle-zoom mode zoom hint region 19)
+      (should (etaf-value zoom))
+      (should (string-match-p "局部放大" (etaf-value hint)))
+      (etaf-go--toggle-zoom mode zoom hint region 19)
+      (should-not (etaf-value zoom))
+      (should (string-match-p "全盘" (etaf-value hint))))
+    (setf (etaf-value mode) 'replay)
+    (etaf-go--toggle-zoom mode zoom hint region 19)
+    (should (string-match-p "只用于死活" (etaf-value hint)))
+    (setf (etaf-value mode) 'practice)
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+      (etaf-go--toggle-zoom mode zoom hint region 19)
+      (should (string-match-p "需要图形界面" (etaf-value hint))))))
+
+(ert-deftest etaf-go-view-region-renders-local-board ()
+  "A local view renders only its coordinates and intersections."
+  (let* ((root (etaf-go--sgf-parse "(;GM[1]SZ[19]AB[dd][ed]AW[de])"))
+         (position (etaf-go--position 19 root (list root)))
+         (position-ref (etaf-ref position))
+         (marks-ref (etaf-ref nil))
+         (numbers-ref (etaf-ref nil))
+         (territory-ref (etaf-ref nil))
+         (metrics (list :columns 2 :lines 1 :width 40 :height 40
+                        :char-width 1 :graphic nil))
+         (buffer (etaf-app-open
+                  "*Go: region test*"
+                  (etaf-view
+                   (etaf-go--board
+                    :size 19 :position position-ref
+                    :palette etaf-go--light-theme
+                    :metrics metrics :marks marks-ref
+                    :show-numbers numbers-ref :territory territory-ref
+                    :view '(2 3 5 4)
+                    :on-press (lambda (&rest _) nil)))
+                  :state nil)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let ((text (buffer-string)))
+            (should (string-match-p "D" text))
+            (should (string-match-p "G" text))
+            (should (string-match-p "17" text))
+            (should (string-match-p "13" text))
+            (should-not (string-match-p "19" text))))
+      (etaf-app-close buffer))))
+
 (provide 'etaf-go-view-test)
 ;;; etaf-go-view-test.el ends here

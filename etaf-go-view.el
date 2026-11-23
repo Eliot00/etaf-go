@@ -92,11 +92,17 @@ larger, so return the most lines whose rounded columns still fit."
 (defconst etaf-go--row-layout-columns 86
   "Minimum window width in character columns for a side-by-side layout.")
 
-(defun etaf-go--board-metrics (size)
+(defun etaf-go--board-width-ch (metrics view)
+  "Return the board width in character cells for METRICS and VIEW."
+  (* (+ 2 (etaf-go--region-width view))
+     (or (plist-get metrics :columns) 1)))
+
+(defun etaf-go--board-metrics (size &optional view)
   "Choose the largest near-square cell for a SIZE board.
 The board takes the window height left after the controls and the
 width left after the side panel, so it grows with the frame instead of
-staying at the smallest square cell."
+staying at the smallest square cell.  VIEW limits the board to a local
+region, so its cells can be larger."
   (if (and (display-graphic-p) (image-type-available-p 'svg))
       (let* ((display (etaf-display-metrics))
              (char-width (max 1 (plist-get display :char-width)))
@@ -106,7 +112,9 @@ staying at the smallest square cell."
              (window-columns (floor (or (car viewport)
                                         (* 80 char-width))
                                     char-width))
-             (grid (+ size 2))
+             (view (or view (etaf-go--region-full size)))
+             (grid (+ 2 (max (etaf-go--region-height view)
+                             (etaf-go--region-width view))))
              (forced (bound-and-true-p etaf-go-cell-lines))
              (max-lines
               (if (integerp forced)
@@ -175,13 +183,117 @@ staying at the smallest square cell."
     (setcar cache (make-hash-table :test #'equal)))
   (puthash key value (car cache)))
 
-(defun etaf-go--grid-point (row column size)
-  "Return (BOARD-ROW . BOARD-COLUMN) for grid ROW/COLUMN, or nil."
-  (let ((board-row (1- row))
-        (board-column (1- column)))
-    (when (and (>= board-row 0) (< board-row size)
-               (>= board-column 0) (< board-column size))
-      (cons board-row board-column))))
+(defun etaf-go--region-full (size)
+  "Return the full-board view (TOP LEFT HEIGHT WIDTH) for SIZE."
+  (list 0 0 size size))
+
+(defun etaf-go--region-width (region)
+  "Return REGION's width in intersections."
+  (nth 3 region))
+
+(defun etaf-go--region-height (region)
+  "Return REGION's height in intersections."
+  (nth 2 region))
+
+(defun etaf-go--grid-point (row column size &optional region)
+  "Return (BOARD-ROW . BOARD-COLUMN) for grid ROW/COLUMN, or nil.
+REGION, a (TOP LEFT HEIGHT WIDTH) view, narrows the visible board."
+  (let* ((region (or region (etaf-go--region-full size)))
+         (top (nth 0 region))
+         (left (nth 1 region))
+         (height (nth 2 region))
+         (width (nth 3 region)))
+    (when (and (>= row 1) (<= row height)
+               (>= column 1) (<= column width))
+      (cons (+ top (1- row)) (+ left (1- column))))))
+
+(defun etaf-go--margin-label (size region row column)
+  "Return the coordinate label for grid ROW/COLUMN outside the board."
+  (let ((top (nth 0 region))
+        (left (nth 1 region))
+        (height (nth 2 region))
+        (width (nth 3 region)))
+    (cond
+     ((and (= row 0) (>= column 1) (<= column width))
+      (etaf-go--column-name (+ left (1- column))))
+     ((and (= column 0) (>= row 1) (<= row height))
+      (number-to-string (- size (+ top (1- row)))))
+     (t nil))))
+
+(defconst etaf-go--zoom-margin 2
+  "Intersections kept around a problem when zooming.")
+
+(defconst etaf-go--zoom-minimum 5
+  "Smallest local view side, in intersections.")
+
+(defconst etaf-go--zoom-limit 4096
+  "Largest solution subtree walked when finding a problem's region.")
+
+(defconst etaf-go--zoom-full-fraction 0.8
+  "Use the full board when a problem covers this fraction of its area.")
+
+(defun etaf-go--problem-region (path size)
+  "Return a local view (TOP LEFT HEIGHT WIDTH) around the problem at PATH.
+The region spans the stones in the starting position plus every move,
+setup point and mark in the solution tree below it, with a two-point
+margin.  A view covering most of the board is replaced by the full board."
+  (let* ((root (car path))
+         (start (car (last path)))
+         (state (etaf-go--position size root path))
+         (points nil)
+         (seen (make-hash-table :test #'eq))
+         (count 0))
+    (dotimes (index (length (plist-get state :board)))
+      (when (> (aref (plist-get state :board) index) 0)
+        (push (cons (/ index size) (% index size)) points)))
+    (cl-labels
+        ((add (index)
+           (push (cons (/ index size) (% index size)) points))
+         (visit (node)
+           (unless (or (gethash node seen)
+                       (>= count etaf-go--zoom-limit))
+             (puthash node t seen)
+             (cl-incf count)
+             (when-let* ((move (etaf-go--node-move node size)))
+               (when (integerp (plist-get move :point))
+                 (add (plist-get move :point))))
+             (dolist (key '("AB" "AW" "AE"))
+               (dolist (index (etaf-go--expand-points
+                               size (etaf-go--prop node key)))
+                 (add index)))
+             (dolist (entry (etaf-go--node-marks node size))
+               (add (car entry)))
+             (dolist (child (etaf-go--solution-children node))
+               (visit child)))))
+      (visit start))
+    (if (null points)
+        (etaf-go--region-full size)
+      (let* ((rows (mapcar #'car points))
+             (cols (mapcar #'cdr points))
+             (top (max 0 (- (apply #'min rows) etaf-go--zoom-margin)))
+             (left (max 0 (- (apply #'min cols) etaf-go--zoom-margin)))
+             (bottom (min (1- size)
+                          (+ (apply #'max rows) etaf-go--zoom-margin)))
+             (right (min (1- size)
+                         (+ (apply #'max cols) etaf-go--zoom-margin)))
+             (height (1+ (- bottom top)))
+             (width (1+ (- right left))))
+        (if (>= (* height width) (* etaf-go--zoom-full-fraction size size))
+            (etaf-go--region-full size)
+          ;; Keep small problems readable without cutting the board.
+          (unless (= height size)
+            (let* ((needed (max 0 (- etaf-go--zoom-minimum height)))
+                   (before (min top (ceiling needed 2)))
+                   (after (min (- size (+ top height)) (- needed before))))
+              (setq top (- top before)
+                    height (+ height before after))))
+          (unless (= width size)
+            (let* ((needed (max 0 (- etaf-go--zoom-minimum width)))
+                   (before (min left (ceiling needed 2)))
+                   (after (min (- size (+ left width)) (- needed before))))
+              (setq left (- left before)
+                    width (+ width before after))))
+          (list top left height width))))))
 
 (defun etaf-go--text-glyph (size row column piece star)
   "Return the text fallback glyph for a board point."
@@ -363,21 +475,19 @@ staying at the smallest square cell."
          (_ "")))
      marks)))
 
-(defun etaf-go--margin-art (cache palette metrics size row column focused)
-  "Return cached artwork for a coordinate margin cell."
-  (let* ((palette (etaf-go--palette-value palette))
+(defun etaf-go--margin-art (cache palette metrics size row column focused
+                                  &optional region)
+  "Return cached artwork for a coordinate margin cell.
+REGION narrows the visible board to a local view."
+  (let* ((region (or region (etaf-go--region-full size)))
+         (palette (etaf-go--palette-value palette))
          (width (plist-get metrics :width))
          (height (plist-get metrics :height))
          (x0 (* column width))
          (y0 (* row height))
-         (key (list 'margin palette width height size row column focused)))
+         (key (list 'margin palette width height size region row column focused)))
     (or (etaf-go--cache-get cache key)
-        (let* ((label (cond
-                       ((and (= row 0) (>= column 1) (<= column size))
-                        (etaf-go--column-name (1- column)))
-                       ((and (= column 0) (>= row 1) (<= row size))
-                        (number-to-string (- size (1- row))))
-                       (t nil)))
+        (let* ((label (etaf-go--margin-label size region row column))
                (body (concat
                       (etaf-ui-svg-rect x0 y0 width height
                                         :fill (plist-get palette :go-margin))
@@ -484,50 +594,53 @@ TERRITORY is an ownership vector from `etaf-go--territory', or nil."
                               (list x0 y0 width height)))))))
 
 (etaf-define-component etaf-go--board
-    (&key size position palette metrics marks show-numbers territory on-press)
+    (&key size position palette metrics marks show-numbers territory on-press
+          view)
   "Render the Go board as a SIZE square with one coordinate margin.
-TERRITORY, when non-nil, is an ownership vector that paints the score
-estimate on empty points."
+VIEW, a (TOP LEFT HEIGHT WIDTH) region, shows only a local part of the
+board so its cells can be larger.  TERRITORY, when non-nil, is an
+ownership vector that paints the score estimate on empty points."
   :bindings ((cache (cons (make-hash-table :test #'equal)
                           (make-hash-table :test #'equal)))
-             (cursor (etaf-ref nil :test #'equal)))
+             (cursor (etaf-ref nil :test #'equal))
+             (region (or view (etaf-go--region-full size)))
+             (view-height (etaf-go--region-height region))
+             (view-width (etaf-go--region-width region)))
   :view
   (etaf-tile-grid
-   :ref 'go-board :rows (+ size 2) :columns (+ size 2)
+   :ref 'go-board :rows (+ view-height 2) :columns (+ view-width 2)
    :cell-width (plist-get metrics :columns)
    :cell-height (plist-get metrics :lines)
    :region (list :id 'go-board :label "围棋棋盘" :key "b"
                  :enter (intern (format "go-cell-%d-%d"
-                                        (1+ (/ size 2)) (1+ (/ size 2)))))
+                                        (1+ (/ view-height 2))
+                                        (1+ (/ view-width 2)))))
    :cell-ref (lambda (row column) (intern (format "go-cell-%d-%d" row column)))
    :cell-image
    (when (plist-get metrics :graphic)
      (lambda (row column)
-       (let ((point (etaf-go--grid-point row column size))
+       (let ((point (etaf-go--grid-point row column size region))
              (focused (equal (cons row column) (etaf-value cursor))))
          (if point
              (etaf-go--intersection-art
               cache palette metrics size row column
               (etaf-value position) (etaf-value marks)
               (etaf-value show-numbers) (etaf-value territory) focused)
-           (etaf-go--margin-art cache palette metrics size row column focused)))))
+           (etaf-go--margin-art cache palette metrics size row column
+                                focused region)))))
    :cell-text
    (lambda (row column)
-     (let ((point (etaf-go--grid-point row column size)))
+     (let ((point (etaf-go--grid-point row column size region)))
        (cond
         (point
          (let* ((index (+ (* (car point) size) (cdr point)))
                 (piece (aref (plist-get (etaf-value position) :board) index))
                 (star (cl-member point (etaf-go--star-points size) :test #'equal)))
            (etaf-go--text-glyph size (car point) (cdr point) piece star)))
-        ((and (= row 0) (>= column 1) (<= column size))
-         (etaf-go--column-name (1- column)))
-        ((and (= column 0) (>= row 1) (<= row size))
-         (number-to-string (- size (1- row))))
-        (t " "))))
+        (t (or (etaf-go--margin-label size region row column) " ")))))
    :cell-background
    (lambda (row column)
-     (let* ((point (etaf-go--grid-point row column size))
+     (let* ((point (etaf-go--grid-point row column size region))
             (index (and point (+ (* (car point) size) (cdr point))))
             (palette (etaf-go--palette-value palette))
             (last (and index (eql index (plist-get (etaf-value position) :last)))))
@@ -539,7 +652,7 @@ estimate on empty points."
         (t (plist-get palette :go-board)))))
    :cell-color
    (lambda (row column)
-     (let* ((point (etaf-go--grid-point row column size))
+     (let* ((point (etaf-go--grid-point row column size region))
             (index (and point (+ (* (car point) size) (cdr point))))
             (piece (and index (aref (plist-get (etaf-value position) :board) index))))
        (plist-get (etaf-go--palette-value palette)
@@ -549,7 +662,7 @@ estimate on empty points."
                         (t :go-line)))))
    :cell-label
    (lambda (row column)
-     (let ((point (etaf-go--grid-point row column size)))
+     (let ((point (etaf-go--grid-point row column size region)))
        (if point
            (let* ((index (+ (* (car point) size) (cdr point)))
                   (state (etaf-value position))
@@ -574,17 +687,20 @@ estimate on empty points."
                 (if values " · 有标记" ""))))
          (cond
           ((and (= row 0) (= column 0)) "棋盘角")
-          ((and (= row 0) (>= column 1) (<= column size))
-           (concat "列 " (etaf-go--column-name (1- column))))
-          ((and (= column 0) (>= row 1) (<= row size))
-           (format "第 %d 行" (- size (1- row))))
+          ((and (= row 0) (>= column 1) (<= column view-width))
+           (concat "列 "
+                   (etaf-go--column-name
+                    (+ (nth 1 region) (1- column)))))
+          ((and (= column 0) (>= row 1) (<= row view-height))
+           (format "第 %d 行"
+                   (- size (+ (nth 0 region) (1- row)))))
           (t "棋盘边")))))
    :on-cell-focus
    (lambda (row column)
      (setf (etaf-value cursor) (cons row column)))
    :on-cell-press
    (lambda (row column)
-     (when-let* ((point (etaf-go--grid-point row column size)))
+     (when-let* ((point (etaf-go--grid-point row column size region)))
        (funcall on-press (car point) (cdr point))))))
 
 (defun etaf-go--mode-name (mode)
@@ -1154,9 +1270,9 @@ When several answers exist the hint names how many there are."
 
 (defun etaf-go--cycle-mode (mode-ref path-ref hint-ref
                                       practice-start-ref practice-color-ref
-                                      position size)
+                                      zoom-ref position size)
   "Cycle replay, practice and study modes.
-Edit mode is entered with its own key and leaves the cycle with `m'."
+Entering practice turns on its local view; `z' toggles it."
   (let* ((current (etaf-value mode-ref))
          (next (pcase current
                  ('replay 'practice)
@@ -1170,7 +1286,8 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
             (or (etaf-go--solution-color
                  (car (last (etaf-value path-ref))) size)
                 (plist-get (etaf-value position) :to-play)
-                etaf-go--black)))
+                etaf-go--black)
+            (etaf-value zoom-ref) t))
     (setf (etaf-value mode-ref) next
           (etaf-value hint-ref)
           (pcase next
@@ -1306,6 +1423,25 @@ Edit mode is entered with its own key and leaves the cycle with `m'."
       nil
     (etaf-go-close)))
 
+(defun etaf-go--toggle-zoom (mode-ref zoom-ref hint-ref region-ref size)
+  "Toggle the practice local view, or explain why it is unavailable."
+  (cond
+   ((not (eq (etaf-value mode-ref) 'practice))
+    (setf (etaf-value hint-ref) "局部放大只用于死活模式"))
+   ((not (display-graphic-p))
+    (setf (etaf-value hint-ref) "局部放大需要图形界面"))
+   (t
+    (setf (etaf-value zoom-ref) (not (etaf-value zoom-ref)))
+    (if (etaf-value zoom-ref)
+        (let ((region (etaf-value region-ref)))
+          (setf (etaf-value hint-ref)
+                (if (equal region (etaf-go--region-full size))
+                    "全盘（题目覆盖范围较大）"
+                  (format "局部放大 %d×%d"
+                          (etaf-go--region-width region)
+                          (etaf-go--region-height region)))))
+      (setf (etaf-value hint-ref) "显示全盘")))))
+
 (defun etaf-go--toggle-theme (appearance-ref)
   "Switch between the light and dark palettes."
   (setf (etaf-value appearance-ref)
@@ -1377,15 +1513,25 @@ With PLAY non-nil start a new local game instead of an editor record."
    (root (etaf-go--session-root session))
    (size (etaf-go--session-size session))
    (cell-lines (etaf-ref etaf-go-cell-lines))
+   (path (etaf-ref (list root)))
+   (mode (etaf-ref (etaf-go--session-mode session)))
+   (practice-start (etaf-ref (list root)))
+   (zoom (etaf-ref (eq (etaf-go--session-mode session) 'practice)))
+   (region
+    (etaf-computed
+     (lambda ()
+       (if (and (etaf-value zoom)
+                (eq (etaf-value mode) 'practice)
+                (display-graphic-p))
+           (etaf-go--problem-region (etaf-value practice-start) size)
+         (etaf-go--region-full size)))
+     :test #'equal))
    (metrics
     (etaf-computed
      (lambda ()
        (let ((etaf-go-cell-lines (etaf-value cell-lines)))
-         (etaf-go--board-metrics size)))
+         (etaf-go--board-metrics size (etaf-value region))))
      :test #'equal))
-   (path (etaf-ref (list root)))
-   (mode (etaf-ref (etaf-go--session-mode session)))
-   (practice-start (etaf-ref (list root)))
    (practice-color
     (etaf-ref (or (etaf-go--solution-color root size)
                   (etaf-go--initial-to-play root))))
@@ -1479,7 +1625,7 @@ With PLAY non-nil start a new local game instead of an editor record."
             "研究模式点击棋盘落子，分支直接写入棋谱：u 撤销，s 停一手，x 删除分支。"
             "e 进入编辑模式：先选工具再点棋盘，可摆黑/白子、擦除、加三角/方块/圆圈/叉或标签；"
             "P 切换行棋方。新建棋谱后用编辑模式摆题，再保存成 .sgf。"
-            "S 显示数子法形势判断；L 循环 cell 行数（矮窗口选 2 更接近正方形，可能滚动）。"
+            "S 显示数子法形势判断；z 在死活模式下局部放大/全盘；L 循环 cell 行数。"
             "c 编辑注释；w 保存，W 另存为；N 新建；o 打开。"
             "提子、打劫和禁着点由内置规则判断；坐标列不包含 I。")
     :keys
@@ -1509,7 +1655,7 @@ With PLAY non-nil start a new local game instead of an editor record."
       (list "m"
             (lambda ()
               (etaf-go--cycle-mode mode path hint
-                                   practice-start practice-color position size))
+                                   practice-start practice-color zoom position size))
             "切换模式")
       (list "e"
             (lambda ()
@@ -1569,6 +1715,10 @@ With PLAY non-nil start a new local game instead of an editor record."
       (list "L"
             (lambda () (etaf-go--cycle-cell-lines cell-lines hint))
             "棋盘 cell 行数")
+      (list "z"
+            (lambda ()
+              (etaf-go--toggle-zoom mode zoom hint region size))
+            "局部放大")
       (list "T"
             (lambda () (etaf-go--toggle-theme appearance))
             "主题")
@@ -1611,9 +1761,11 @@ With PLAY non-nil start a new local game instead of an editor record."
       :padding '((lh 1) (ch 2))
       (flex :width 'stretch :flex-direction (if (etaf-value compact) 'column 'row)
         (column :ref 'go-root :flex-shrink 0 :height 'stretch
-          :width (list 'ch (max 36
-                                (* (+ size 2)
-                                   (plist-get (etaf-value metrics) :columns))))
+          :width (list 'ch
+                       (max 36
+                            (etaf-go--board-width-ch
+                             (etaf-value metrics)
+                             (etaf-value region))))
           :item-gap '(lh 0)
           (flex :width 'stretch :justify-content 'space-between
             :align-items 'center
@@ -1632,6 +1784,7 @@ With PLAY non-nil start a new local game instead of an editor record."
               :metrics (etaf-value metrics) :marks marks
               :show-numbers show-numbers
               :territory territory
+              :view (etaf-value region)
               :on-press
               (lambda (row column)
                 (etaf-go--press mode path dirty hint
@@ -1681,7 +1834,7 @@ With PLAY non-nil start a new local game instead of an editor record."
              :on-press
              (lambda ()
                (etaf-go--cycle-mode mode path hint
-                                    practice-start practice-color position size)))
+                                    practice-start practice-color zoom position size)))
             (etaf-button :label "编辑" :ref 'go-edit
               :variant (if (eq (etaf-value mode) 'edit) 'secondary 'ghost)
               :aria-selected (eq (etaf-value mode) 'edit)
@@ -1815,6 +1968,21 @@ With PLAY non-nil start a new local game instead of an editor record."
             :help-echo "循环切换棋盘 cell 行数（auto/1/2/3/4）"
             :on-press
             (lambda () (etaf-go--cycle-cell-lines cell-lines hint)))
+          (etaf-label :if (and (eq (etaf-value mode) 'practice)
+                               (not (equal (etaf-value region)
+                                           (etaf-go--region-full size))))
+            :text (format "局部 %d×%d"
+                          (etaf-go--region-width (etaf-value region))
+                          (etaf-go--region-height (etaf-value region)))
+            :variant 'muted)
+          (etaf-button :if (eq (etaf-value mode) 'practice)
+            :label (if (equal (etaf-value region) (etaf-go--region-full size))
+                       "局部放大" "显示全盘")
+            :ref 'go-zoom :variant 'ghost
+            :disabled (not (display-graphic-p))
+            :help-echo "局部放大 / 全盘（z）"
+            :on-press
+            (lambda () (etaf-go--toggle-zoom mode zoom hint region size)))
           (etaf-label :text "注释" :variant 'muted)
           (column :height '(lh 7) :overflow 'scroll :width 'stretch
             (etaf-label :if (etaf-value node-name)

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4
+
+- Practice mode now zooms into the problem in graphical frames: the view is
+  the bounding box of the starting stones plus every move, setup point and
+  mark in the solution tree, with a two-point margin and a five-intersection
+  minimum.  A problem covering 80 percent of the board keeps the full view.
+- `z` (or the 局部放大/显示全盘 button) toggles the local view in practice;
+  the sidebar shows the visible size.  Entering practice through mode cycling
+  turns it on.
+
 ## 0.3.3
 
 - Practice accepts every recorded first move at a node, so a problem with
