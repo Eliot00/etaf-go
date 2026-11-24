@@ -557,7 +557,7 @@
       (unwind-protect
           (progn
             (should (eq (etaf-app-state buffer) 'home))
-            (should (string-match-p "本地对弈" (etaf-go-test--text buffer)))
+            (should (string-match-p "本地双人" (etaf-go-test--text buffer)))
             (should (string-match-p "19 路" (etaf-go-test--text buffer)))
             (should (string-match-p "打开棋谱" (etaf-go-test--text buffer))))
         (when (buffer-live-p buffer)
@@ -817,6 +817,55 @@
             (should (string-match-p "13" text))
             (should-not (string-match-p "19" text))))
       (etaf-app-close buffer))))
+
+(defun etaf-go-test--engine-program ()
+  "Return the fake engine command, or nil when python3 is missing."
+  (when (executable-find "python3")
+    (list "python3"
+          (expand-file-name "test/fake-gtp-engine.py" etaf-go--directory))))
+
+(ert-deftest etaf-go-view-engine-plays-its-side ()
+  "With an engine configured, it moves for its side and answers the human."
+  (let ((program (etaf-go-test--engine-program)))
+    (if (not program)
+        (ert-skip "python3 is not available")
+      (let ((etaf-go-engine-program program)
+            (etaf-go-engine-handicap 'black))
+        (cl-letf (((symbol-function 'display-graphic-p)
+                   (lambda (&rest _) nil)))
+          (let* ((buffer (etaf-go-play 9))
+                 (runtime (etaf-runtime-for-buffer buffer))
+                 (session (etaf-app-state buffer))
+                 (root (etaf-go--session-root session)))
+            (unwind-protect
+                (progn
+                  (etaf-go-test--wait 1.2)
+                  (should (etaf-go--session-engine session))
+                  (should (= (etaf-go--session-engine-color session)
+                             etaf-go--black))
+                  ;; The engine opened with a legal black move.
+                  (should (= (length (etaf-go--node-children root)) 1))
+                  (let* ((first (car (etaf-go--node-children root)))
+                         (move (etaf-go--node-move first 9)))
+                    (should (= (plist-get move :color) etaf-go--black))
+                    (should (integerp (plist-get move :point)))
+                    (should (< (plist-get move :point) (* 9 9))))
+                  (should (string-match-p "轮到你"
+                                          (etaf-go-test--text buffer)))
+                  ;; The human answers as white; the engine then replies.
+                  (etaf-go-test--press runtime 'go-cell-5-5)
+                  (etaf-go-test--wait 1.4)
+                  (should (string-match-p "第 [3-9][0-9]* /"
+                                          (etaf-go-test--text buffer)
+                                          )))
+              (etaf-go-close buffer))))))))
+
+(defun etaf-go-test--wait (seconds)
+  "Wait up to SECONDS while letting timers and processes run.
+`sit-for' does not drive timers in batch mode, so tests wait explicitly."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (< (float-time) deadline)
+      (accept-process-output nil 0.05))))
 
 (provide 'etaf-go-view-test)
 ;;; etaf-go-view-test.el ends here

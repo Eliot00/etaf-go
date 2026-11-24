@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.3.4
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.1") (etaf-ui "0.3.0"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -12,8 +12,9 @@
 ;; plays local two-player games and renders the board with vector stones,
 ;; coordinate margins and SGF marks.
 ;;
-;; There is no computer player: Go needs a real engine such as KataGo.
-;; `play' is hot-seat: both sides use the same board and alternate turns.
+;; There is no built-in computer player: strength comes from a GTP engine
+;; you point the package at.  `play' is hot-seat when no engine is set and a
+;; game against that engine when `etaf-go-engine-program' is configured.
 ;;
 ;; Five modes:
 ;;   play     - local two-player game with captures, ko, pass, resign,
@@ -41,7 +42,11 @@
 ;; PRACTICE non-nil the session starts in practice mode.
 ;;
 ;; Function: etaf-go-play (&optional size)
-;; Start a local two-player game on a SIZE board, defaulting to 19.
+;; Start a game on a SIZE board.  With `etaf-go-engine-program' set one side
+;; is a GTP engine, otherwise both sides are local players.
+;;
+;; Function: etaf-go-play-local (&optional size)
+;; Start a local two-player game regardless of any engine setting.
 ;;
 ;; Function: etaf-go-new (&optional size)
 ;; Open an empty record in edit mode, ready to be set up and saved.
@@ -70,7 +75,12 @@
 
 (require 'etaf-go-view)
 
+(declare-function etaf-go--engine-close "etaf-go-view" (session))
 (declare-function etaf-go--home-open "etaf-go-view" ())
+(declare-function etaf-go-gtp-start "etaf-go-gtp"
+                  (program &optional arguments))
+(declare-function etaf-go-gtp-stop "etaf-go-gtp" (session))
+(declare-function etaf-go-gtp-cleanup "etaf-go-gtp" ())
 
 (defgroup etaf-go nil
   "Go board, SGF replay and life-and-death practice."
@@ -89,6 +99,36 @@
   "Initial appearance of new Go sessions.
 `auto' follows the opening frame's background mode."
   :type '(choice (const auto) (const light) (const dark)))
+
+(defcustom etaf-go-engine-program nil
+  "GTP engine command used by `etaf-go-play'.
+A string names one executable; a list is a full command with arguments,
+for example (\"katago\" \"gtp\" \"-model\" \"...\" \"-config\" \"...\").
+When nil, engine play is unavailable and only local two-player play runs."
+  :type '(choice (const :tag "None" nil) string (repeat string)))
+
+(defcustom etaf-go-engine-arguments nil
+  "Extra arguments passed to `etaf-go-engine-program'.
+Useful when the program is a string and only a few flags are needed."
+  :type '(repeat string))
+
+(defcustom etaf-go-engine-size 19
+  "Board size offered when a new engine game starts."
+  :type 'integer)
+
+(defcustom etaf-go-engine-handicap 'black
+  "Which side the engine plays in a new game.
+`black' puts the human on white, `white' puts the human on black, and
+`none' leaves both sides to the local players."
+  :type '(choice (const black) (const white) (const none)))
+
+(defcustom etaf-go-engine-timeout 10
+  "Seconds to wait for one GTP response before reporting a timeout."
+  :type 'number)
+
+(defcustom etaf-go-engine-komi 6.5
+  "Komi reported to the engine in a new game."
+  :type 'number)
 
 (defcustom etaf-go-cell-lines 'auto
   "Height of one graphical board cell in text lines.
@@ -184,11 +224,47 @@ MODE is `play' or `edit' and selects the title, file name and buffer."
            (root (etaf-go--sgf-parse text)))
       (etaf-go--session-create file root mode))))
 
+(defun etaf-go--engine-session (size color)
+  "Return a play session of SIZE with an engine playing COLOR.
+Signal `user-error' when no engine is configured or it does not start."
+  (unless etaf-go-engine-program
+    (user-error "没有配置 GTP 引擎；设置 etaf-go-engine-program 后再试"))
+  (let* ((session (etaf-go--empty-session size 'play))
+         (engine (condition-case error
+                     (etaf-go-gtp-start etaf-go-engine-program
+                                        etaf-go-engine-arguments)
+                   (etaf-go-gtp-error
+                    (user-error "无法启动引擎：%s"
+                                (or (cadr error)
+                                    (error-message-string error)))))))
+    (setf (etaf-go--session-engine session) engine
+          (etaf-go--session-engine-color session)
+          (if (eq color 'black) etaf-go--black etaf-go--white))
+    session))
+
 ;;;###autoload
 (defun etaf-go-play (&optional size)
-  "Start a local two-player game on a SIZE board, defaulting to 19.
-Both sides alternate turns on the same board; `s' passes and `R'
-resigns.  Two passes end the game and show the area score."
+  "Start a game on a SIZE board, defaulting to `etaf-go-engine-size'.
+With `etaf-go-engine-program' set, one side is a GTP engine and the other
+is you, following `etaf-go-engine-handicap'.  Without an engine both
+sides are local players.  `s' passes and `R' resigns; two passes end the
+game and show the area score."
+  (interactive (list (read-number "棋盘大小: " etaf-go-engine-size)))
+  (let* ((size (or size etaf-go-engine-size 19))
+         (has-engine (and etaf-go-engine-program
+                          (not (eq etaf-go-engine-handicap 'none))))
+         (session (if has-engine
+                      (etaf-go--engine-session size etaf-go-engine-handicap)
+                    (etaf-go--empty-session size 'play)))
+         (size (etaf-go--session-size session))
+         (name (if has-engine
+                   (format "*Go: 人机 %d 路*" size)
+                 (format "*Go: 对弈 %d 路*" size))))
+    (etaf-go--display session name)))
+
+;;;###autoload
+(defun etaf-go-play-local (&optional size)
+  "Start a local two-player game on a SIZE board, defaulting to 19."
   (interactive (list (read-number "棋盘大小: " 19)))
   (let* ((session (etaf-go--empty-session size 'play))
          (size (etaf-go--session-size session)))
@@ -220,12 +296,16 @@ as a life-and-death problem."
 
 ;;;###autoload
 (defun etaf-go-close (&optional buffer)
-  "Close the Go application or main menu in BUFFER."
+  "Close the Go application or main menu in BUFFER.
+An engine game also stops its GTP process."
   (interactive)
   (let* ((buffer (or buffer (current-buffer)))
          (state (etaf-app-state buffer)))
     (unless (or (etaf-go--session-p state) (eq state 'home))
       (user-error "当前缓冲区不是围棋应用"))
+    (when (etaf-go--session-p state)
+      (when (etaf-go--session-engine state)
+        (ignore-errors (etaf-go--engine-close state))))
     (etaf-app-close buffer)))
 
 (provide 'etaf-go)

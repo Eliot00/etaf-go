@@ -2,10 +2,13 @@
 
 在 [ETAF](https://github.com/emacs-taf/etaf) 上实现的围棋对弈、SGF 打谱与死活题应用。
 
-对弈是本地双人（同一块棋盘轮流落子）；没有 AI，不依赖 KataGo/OpenSpiel。
+对弈是本地双人（同一块棋盘轮流落子）；把 `etaf-go-engine-program` 指向一个
+GTP 引擎后就变成人机对弈。没有内置 AI。
 
 ## 功能
 
+- 人机对弈：通过 GTP 协议接任何引擎（KataGo、GNU Go、Leela Zero 等）。
+  引擎替自己那方走子、你下完后自动应手，也会认输和停一手；关闭棋局时结束引擎进程。
 - 本地双人对弈：轮流落子，内置提子、简单劫、禁着点；`s` 停一手，`R` 认输，
   `u` 撤销，双方连续停一手后自动按数子法给出结果，可保存成 SGF。
 - SGF (FF[4]) 打谱：主谱、变化、摆子、注释、SGF 标记、手数、提子数。
@@ -82,11 +85,42 @@
 ```
 M-x etaf-go            ; 主界面：对弈 / 打开棋谱 / 死活题 / 新建棋谱
 M-x etaf-go-open       ; 同上，打开主界面
-M-x etaf-go-play       ; 直接开一局本地双人对弈（默认 19 路）
+M-x etaf-go-play       ; 开局：配了引擎就是人机，否则本地双人
+M-x etaf-go-play-local ; 总是本地双人
 M-x etaf-go-open-file  ; 直接打开 SGF；C-u 前缀进入死活练习
 M-x etaf-go-new        ; 新建空棋谱（默认 19 路），直接进入编辑模式
 M-x etaf-go-problems   ; 从 etaf-go-problem-directory 选死活题
 ```
+
+### 接入 GTP 引擎
+
+只要引擎支持 GTP，指向它就行：
+
+```elisp
+;; KataGo（推荐，需要模型和配置）
+(setq etaf-go-engine-program
+      '("katago" "gtp"
+        "-model" "/path/to/model.bin.gz"
+        "-config" "/path/to/gtp.cfg"))
+
+;; GNU Go（轻量，适合快速试）
+(setq etaf-go-engine-program "gnugo"
+      etaf-go-engine-arguments '("--mode" "gtp"))
+
+;; 引擎执黑，你执白
+(setq etaf-go-engine-handicap 'black)
+```
+
+相关变量：
+
+- `etaf-go-engine-program`：字符串或命令列表；nil 表示不接引擎。
+- `etaf-go-engine-arguments`：追加的参数。
+- `etaf-go-engine-handicap`：`black`/`white`/`none`，指引擎执哪方。
+- `etaf-go-engine-size`：新对局默认路数。
+- `etaf-go-engine-timeout`：等待一步的秒数，慢引擎要调大。
+- `etaf-go-engine-komi`：报给引擎的贴目。
+
+引擎出错（启动失败、超时、非法着法）会显示在棋盘提示行，不会锁死界面。
 
 默认目录：
 
@@ -164,7 +198,8 @@ ETAF Component 有重复定义保护。改 `etaf-go-view.el` 后不要直接 `C-
 - 编辑只修改当前节点；含落子的节点要先按 `g` 回到开局再摆子。
 - 死活判题只比较当前节点的下一手：同色同点即算正解，不校验后续走法是否最优；
   答对后对手的应手取第一个未被标记为失败图的分支。
-- 对弈目前是本地双人；没有 AI，KataGo/OpenSpiel 接入是后续独立工作。
+- 对弈没有内置 AI：强度取决于你接的 GTP 引擎。没配引擎时是本地双人。
+- 引擎每步都从开局重放局面，慢引擎在长对局里会有可感知的延迟。
 - 对弈结束后的数子结果只显示、不写回 SGF 的 `RE`；保存的是完整着法树。
 - 暂不做题库进度、搜索和批量管理。
 

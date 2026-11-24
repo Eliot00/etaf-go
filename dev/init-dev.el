@@ -42,6 +42,7 @@ disposed before their declarations are replaced."
    (lambda ()
      (load (expand-file-name "etaf-go-rules.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go-sgf.el" etaf-go--directory) nil t)
+     (load (expand-file-name "etaf-go-gtp.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go-view.el" etaf-go--directory) nil t)
      (load (expand-file-name "etaf-go.el" etaf-go--directory) nil t)))
   (etaf-go))

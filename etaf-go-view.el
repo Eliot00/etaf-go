@@ -14,14 +14,21 @@
 (require 'etaf-ui)
 (require 'etaf-go-sgf)
 (require 'etaf-go-rules)
+(require 'etaf-go-gtp)
 
 (defvar etaf-go-appearance)
 (defvar etaf-go-directory)
 (defvar etaf-go-cell-lines)
+(defvar etaf-go-engine-program)
+(defvar etaf-go-engine-arguments)
+(defvar etaf-go-engine-handicap)
+(defvar etaf-go-engine-size)
+(defvar etaf-go-engine-timeout)
 (defvar ebox--display-metrics-cache)
 (declare-function etaf-go--open-file "etaf-go" (file &optional practice))
 (declare-function etaf-go-new "etaf-go" (&optional size))
 (declare-function etaf-go-play "etaf-go" (&optional size))
+(declare-function etaf-go-play-local "etaf-go" (&optional size))
 (declare-function etaf-go-open-file "etaf-go" (&optional file practice))
 (declare-function etaf-go-problems "etaf-go" ())
 (declare-function etaf-go-close "etaf-go" (&optional buffer))
@@ -713,17 +720,22 @@ ownership vector that paints the score estimate on empty points."
     (_ "打谱")))
 
 (defun etaf-go--turn-text (position mode practice-color
-                                    &optional edit-tool game-over)
+                                    &optional edit-tool game-over engine-color)
   "Describe whose turn it is in POSITION for MODE.
 EDIT-TOOL is the active edit tool in edit mode.  GAME-OVER, when
-non-nil, replaces the turn line with the finished game's result."
+non-nil, replaces the turn line with the finished game's result.
+ENGINE-COLOR, when non-nil, marks the side the engine plays."
   (let ((to-play (plist-get position :to-play)))
     (cond
      ((plist-get position :error) "棋谱回放中断")
      ((eq mode 'play)
       (or game-over
-          (format "%s棋行棋 · 本地对弈"
-                  (etaf-go--color-name to-play))))
+          (format "%s棋行棋 · %s"
+                  (etaf-go--color-name to-play)
+                  (pcase engine-color
+                    ('nil "本地对弈")
+                    (color (if (= color to-play)
+                               "电脑" "轮到你"))))))
      ((eq mode 'practice)
       (format "轮到你 · 执%s"
               (etaf-go--color-name (or practice-color to-play))))
@@ -1206,12 +1218,20 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
 
 (defun etaf-go--press (mode-ref path-ref dirty-ref hint-ref practice-color
                                 edit-tool game-over-ref pass-count-ref
-                                size position point)
-  "Handle a board press at POINT according to the current mode."
+                                size position point
+                                &optional session show-score-ref)
+  "Handle a board press at POINT according to the current mode.
+SESSION and SHOW-SCORE-REF let a local move hand the turn to the engine."
   (pcase (etaf-value mode-ref)
     ('play
-     (etaf-go--play-press path-ref dirty-ref hint-ref game-over-ref
-                          pass-count-ref size position point))
+     (let ((before (length (etaf-value path-ref))))
+       (etaf-go--play-press path-ref dirty-ref hint-ref game-over-ref
+                            pass-count-ref size position point)
+       (when (and session
+                  (> (length (etaf-value path-ref)) before))
+         (etaf-go--engine-schedule session mode-ref game-over-ref path-ref
+                                   dirty-ref hint-ref pass-count-ref
+                                   show-score-ref position 0.05))))
     ('practice
      (etaf-go--practice-press path-ref hint-ref practice-color size point))
     ('study
@@ -1442,6 +1462,155 @@ Entering practice turns on its local view; `z' toggles it."
                           (etaf-go--region-height region)))))
       (setf (etaf-value hint-ref) "显示全盘")))))
 
+(defun etaf-go--engine-gtp-color (color)
+  "Return COLOR as the GTP colour word."
+  (if (= color etaf-go--black) "b" "w"))
+
+(defun etaf-go--engine-gtp-vertex (size point)
+  "Return POINT's GTP vertex on a SIZE board, or `pass'."
+  (if (eq point 'pass)
+      "pass"
+    (format "%s%d"
+            (string (aref etaf-go--column-letters (% point size)))
+            (- size (/ point size)))))
+
+(defun etaf-go--engine-moves (path size)
+  "Return PATH's moves as GTP (COLOUR . VERTEX) pairs."
+  (let (moves)
+    (dolist (node path)
+      (when-let* ((move (etaf-go--node-move node size)))
+        (push (cons (etaf-go--engine-gtp-color (plist-get move :color))
+                    (etaf-go--engine-gtp-vertex size (plist-get move :point)))
+              moves)))
+    (nreverse moves)))
+
+(defun etaf-go--engine-sync (session path)
+  "Bring SESSION's engine to the position at PATH.
+The engine is only replayed from the start, which keeps one client path
+for every engine and avoids incremental-desync bugs."
+  (etaf-go-gtp-sync-position
+   (etaf-go--session-engine session)
+   (etaf-go--session-size session)
+   (etaf-go--komi (etaf-go--session-root session))
+   (etaf-go--engine-moves path (etaf-go--session-size session))))
+
+(defun etaf-go--engine-request-move (session path)
+  "Ask SESSION's engine for the move at PATH.
+Return (COLOR . POINT) where POINT may be `pass' or `resign'."
+  (let* ((size (etaf-go--session-size session))
+         (state (etaf-go--position size (etaf-go--session-root session) path))
+         (color (plist-get state :to-play)))
+    (etaf-go--engine-sync session path)
+    (let* ((vertex (etaf-go-gtp-genmove
+                    (etaf-go--session-engine session)
+                    (etaf-go--engine-gtp-color color)))
+           (point (etaf-go-gtp-vertex-index size (or vertex "pass"))))
+      (cond
+       ((eq point 'resign) (cons color 'resign))
+       ((null point)
+        (signal 'etaf-go-gtp-error
+                (list (format "引擎给出了无法识别的位置：%s" vertex))))
+       (t (cons color point))))))
+
+(defun etaf-go--engine-play (session path-ref dirty-ref hint-ref game-over-ref
+                                     pass-count-ref show-score-ref path)
+  "Play one engine move at PATH and record it.
+Return non-nil when a move was played."
+  (let* ((size (etaf-go--session-size session))
+         (move (etaf-go--engine-request-move session path))
+         (color (car move))
+         (point (cdr move)))
+    (cond
+     ((eq point 'resign)
+      (let ((winner (etaf-go--color-name (etaf-go--opponent color))))
+        (setf (etaf-value game-over-ref) (format "%s中盘胜（引擎认输）" winner)
+              (etaf-value hint-ref)
+              (format "%s认输，%s中盘胜"
+                      (etaf-go--color-name color) winner)))
+      t)
+     (t
+      (let* ((node (etaf-go--move-node color point size))
+             (parent (car (last path)))
+             (new-path (append path (list node))))
+        (setf (etaf-go--node-children parent)
+              (append (etaf-go--node-children parent) (list node)))
+        (setf (etaf-value path-ref) new-path
+              (etaf-value dirty-ref) t
+              (etaf-value pass-count-ref)
+              (if (eq point 'pass)
+                  (1+ (or (etaf-value pass-count-ref) 0))
+                0)
+              (etaf-value hint-ref)
+              (format "%s %s（%s）"
+                      (etaf-go--color-name color)
+                      (etaf-go--point-name size point)
+                      (or (etaf-go-gtp-name (etaf-go--session-engine session))
+                          "引擎")))
+        (when (>= (etaf-value pass-count-ref) 2)
+          (let* ((root (car new-path))
+                 (after (etaf-go--position size root new-path))
+                 (score (etaf-go--score (plist-get after :board) size
+                                        (etaf-go--komi root)))
+                 (result (etaf-go--score-result score)))
+            (setf (etaf-value game-over-ref) result
+                  (etaf-value show-score-ref) t
+                  (etaf-value hint-ref)
+                  (format "双方停一手，对局结束：%s" result))))
+        t)))))
+
+(defun etaf-go--engine-turn-p (session mode game-over position)
+  "Return non-nil when the engine should move now."
+  (and session
+       (etaf-go--session-engine session)
+       (eq mode 'play)
+       (null game-over)
+       (eql (etaf-go--session-engine-color session)
+            (plist-get position :to-play))))
+
+(defun etaf-go--maybe-engine-move (session mode game-over-ref path-ref
+                                           dirty-ref hint-ref pass-count-ref
+                                           show-score-ref position)
+  "Let the engine move when it is its turn."
+  (when (etaf-go--engine-turn-p session mode (etaf-value game-over-ref)
+                                (etaf-value position))
+    (let ((path (etaf-value path-ref)))
+      (condition-case error
+          (etaf-go--engine-play session path-ref dirty-ref hint-ref game-over-ref
+                                pass-count-ref show-score-ref path)
+        (etaf-go-gtp-error
+         (setf (etaf-value hint-ref)
+               (format "引擎出错：%s"
+                       (or (cadr error) (error-message-string error)))))))))
+
+(defun etaf-go--engine-close (session)
+  "Stop SESSION's engine when it has one."
+  (when (and session (etaf-go--session-engine session))
+    (ignore-errors (etaf-go-gtp-stop (etaf-go--session-engine session)))
+    (setf (etaf-go--session-engine session) nil
+          (etaf-go--session-engine-color session) nil)))
+
+(defun etaf-go--engine-schedule (session mode-ref game-over-ref path-ref
+                                         dirty-ref hint-ref pass-count-ref
+                                         show-score-ref position-ref
+                                         &optional delay)
+  "Arrange one engine turn after DELAY seconds.
+The move runs outside ETAF's event and render context, so it may read the
+application refs freely and update the SGF tree."
+  (when (etaf-go--session-engine session)
+    (run-at-time
+     (or delay 0.05) nil
+     (lambda ()
+       (ignore-errors
+         (let ((state (etaf-value position-ref)))
+           (when (and (memq (etaf-value mode-ref) '(play))
+                      (null (etaf-value game-over-ref))
+                      (etaf-go--session-engine-color session)
+                      (eql (etaf-go--session-engine-color session)
+                           (plist-get state :to-play)))
+             (etaf-go--maybe-engine-move
+              session (etaf-value mode-ref) game-over-ref path-ref
+              dirty-ref hint-ref pass-count-ref show-score-ref position-ref))))))))
+
 (defun etaf-go--toggle-theme (appearance-ref)
   "Switch between the light and dark palettes."
   (setf (etaf-value appearance-ref)
@@ -1551,6 +1720,16 @@ With PLAY non-nil start a new local game instead of an editor record."
      (lambda ()
        (etaf-go--position size root (etaf-value path)))
      :test #'equal))
+   (engine-turn
+    (etaf-computed
+     (lambda ()
+       (let ((state (etaf-go--position size root (etaf-value path))))
+         (and (etaf-go--session-engine session)
+              (eq (etaf-value mode) 'play)
+              (null (etaf-value game-over))
+              (eql (etaf-go--session-engine-color session)
+                   (plist-get state :to-play)))))
+     :test #'eq))
    (territory
     (etaf-computed
      (lambda ()
@@ -1610,8 +1789,12 @@ With PLAY non-nil start a new local game instead of an editor record."
                     (< (floor width (max 1 char-width)) limit))))))
      :test #'eq)))
   :setup
-  (progn (etaf-theme-provide theme) nil)
-   :view
+  (progn
+    (etaf-theme-provide theme)
+    (etaf-go--engine-schedule session mode game-over path dirty hint
+                              pass-count show-score position 0.3)
+    nil)
+  :view
   (flex :width '(vw 100) :height '(vh 100) :flex-direction 'column
     :background-color (etaf-go--color :ui-bg)
     :color (etaf-go--color :ui-fg)
@@ -1790,7 +1973,8 @@ With PLAY non-nil start a new local game instead of an editor record."
                 (etaf-go--press mode path dirty hint
                                 (etaf-value practice-color)
                                 edit-tool game-over pass-count
-                                size position (+ (* row size) column)))))
+                                size position (+ (* row size) column)
+                                session show-score))))
           (flex :if (eq (etaf-value mode) 'edit)
             :width 'stretch :justify-content 'center
             (etaf-button :for (entry etaf-go--edit-tools)
@@ -1935,7 +2119,8 @@ With PLAY non-nil start a new local game instead of an editor record."
                                       (etaf-value mode)
                                       (etaf-value practice-color)
                                       (etaf-value edit-tool)
-                                      (etaf-value game-over))))
+                                      (etaf-value game-over)
+                                      (etaf-go--session-engine-color session))))
           (etaf-button :if (and (eq (etaf-value mode) 'play)
                                 (not (etaf-value game-over)))
             :label "认输" :ref 'go-resign :variant 'ghost
@@ -2113,8 +2298,16 @@ replace application buffers without closing one inside ETAF's event drain."
       :padding '((lh 2) (ch 2))
       (column :width '(ch 58) :item-gap '(lh 1)
         (etaf-label :text "围棋" :variant 'strong)
-        (etaf-label :text "本地对弈 · 打谱 · 死活题 · 编辑摆题" :variant 'muted)
-        (etaf-label :text "对弈（本地双人）" :variant 'muted)
+        (etaf-label :text "对弈 · 打谱 · 死活题 · 编辑摆题" :variant 'muted)
+        (etaf-label :text (if etaf-go-engine-program
+                              (format "人机对弈（引擎：%s）"
+                                      (if (stringp etaf-go-engine-program)
+                                          (file-name-nondirectory
+                                           etaf-go-engine-program)
+                                        (or (car etaf-go-engine-program)
+                                            "引擎")))
+                            "本地双人对弈")
+          :variant 'muted)
         (flex :width 'stretch :justify-content 'center
           (etaf-button :label "9 路" :ref 'go-home-play-9
             :on-press
@@ -2128,6 +2321,11 @@ replace application buffers without closing one inside ETAF's event drain."
             :on-press
             (lambda ()
               (etaf-go--home-run (lambda () (etaf-go-play 19))))))
+        (flex :width 'stretch :justify-content 'center
+          (etaf-button :label "本地双人" :ref 'go-home-play-local
+            :on-press
+            (lambda ()
+              (etaf-go--home-run (lambda () (etaf-go-play-local 19))))))
         (etaf-label :text "棋谱与题目" :variant 'muted)
         (flex :width 'stretch :justify-content 'center
           (etaf-button :label "打开棋谱" :ref 'go-home-open

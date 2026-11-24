@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- Play against a GTP engine.  `etaf-go-gtp' is a small Go Text Protocol
+  client, so KataGo, GNU Go, Leela Zero and any other GTP engine work.
+  `etaf-go-play' starts an engine game when `etaf-go-engine-program' is set
+  and a local two-player game otherwise; `etaf-go-play-local' always plays
+  locally.  The engine moves for its side, replies after your move, resigns
+  and passes, and its process is stopped when the game buffer closes.
+- New user options: `etaf-go-engine-program`, `etaf-go-engine-arguments`,
+  `etaf-go-engine-handicap`, `etaf-go-engine-size`, `etaf-go-engine-timeout`
+  and `etaf-go-engine-komi`.
+- The turn line names the engine side, and the main menu shows the engine.
+
 ## 0.3.4
 
 - Practice mode now zooms into the problem in graphical frames: the view is

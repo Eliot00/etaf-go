@@ -2,7 +2,7 @@ EMACS ?= $(shell command -v emacs 2>/dev/null || echo /Applications/Emacs.app/Co
 PACKAGE_DIR ?= $(HOME)/.emacs.d/elpa
 LOAD = -L . -L test
 INIT = --eval "(progn (require 'package) (setq package-user-dir \"$(PACKAGE_DIR)\") (package-initialize) (push \"$(CURDIR)\" load-path) (setq load-prefer-newer t))"
-MODULES = etaf-go-rules.el etaf-go-sgf.el etaf-go-view.el
+MODULES = etaf-go-rules.el etaf-go-sgf.el etaf-go-gtp.el etaf-go-view.el
 
 .PHONY: compile test check smoke lint clean
 
