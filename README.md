@@ -30,8 +30,8 @@ GTP 引擎后就变成人机对弈。没有内置 AI。
 ## 依赖
 
 - Emacs 29.1+
-- `etaf` 0.3.1+
-- `etaf-ui` 0.3.0+
+- `etaf` 0.3.4+
+- `etaf-ui` 0.3.3+
 
 `etaf` 和 `etaf-ui` 目前从 etaf 的包仓库安装：
 

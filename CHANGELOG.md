@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+- Declare the versions actually used: `etaf` 0.3.4 and `etaf-ui` 0.3.3.
+  The previous 0.3.1/0.3.0 floor let a stale install pass the dependency
+  check and then fail at run time.
+- Drop the `ebox--display-metrics-cache` reset.  It touched an internal Ebox
+  variable, and measurement shows the cached metrics already match the
+  application buffer, so the reset had no effect and was only a breakage
+  risk.
+
 ## 0.4.0
 
 - Play against a GTP engine.  `etaf-go-gtp' is a small Go Text Protocol

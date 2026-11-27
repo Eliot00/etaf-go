@@ -24,7 +24,6 @@
 (defvar etaf-go-engine-handicap)
 (defvar etaf-go-engine-size)
 (defvar etaf-go-engine-timeout)
-(defvar ebox--display-metrics-cache)
 (declare-function etaf-go--open-file "etaf-go" (file &optional practice))
 (declare-function etaf-go-new "etaf-go" (&optional size))
 (declare-function etaf-go-play "etaf-go" (&optional size))
