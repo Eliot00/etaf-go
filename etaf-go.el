@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.4.1
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.4") (etaf-ui "0.3.3"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -74,6 +74,7 @@
   (file-name-directory (or load-file-name buffer-file-name)))
 
 (require 'etaf-go-view)
+(require 'etaf-go-progress)
 
 (declare-function etaf-go--engine-close "etaf-go-view" (session))
 (declare-function etaf-go--home-open "etaf-go-view" ())
@@ -94,6 +95,12 @@
   (expand-file-name "problems" etaf-go-directory)
   "Directory searched by `etaf-go-problems'."
   :type 'directory)
+
+(defcustom etaf-go-progress-file
+  (expand-file-name "progress.txt" etaf-go-directory)
+  "File that remembers which problems have been solved.
+It is plain text, one line per attempt, so it can be edited freely."
+  :type 'file)
 
 (defcustom etaf-go-appearance 'auto
   "Initial appearance of new Go sessions.
@@ -276,18 +283,42 @@ as a life-and-death problem."
 
 ;;;###autoload
 (defun etaf-go-problems ()
-  "Choose a life-and-death problem from `etaf-go-problem-directory'."
-  (interactive)
+  "Choose a life-and-death problem from `etaf-go-problem-directory'.
+Solved problems are marked and sorted after unsolved ones; with a prefix
+argument every problem is offered in one list."
+  (interactive "P")
   (let* ((directory (expand-file-name etaf-go-problem-directory))
          (files (and (file-directory-p directory)
                      (directory-files-recursively directory "\\.sgf\\'")))
-         (choices (mapcar (lambda (file)
-                            (cons (file-relative-name file directory) file))
-                          files)))
-    (unless choices
+         (summary (etaf-go-progress-summary files)))
+    (unless files
       (user-error "没有找到死活题；把 .sgf 文件放进 %s" directory))
-    (let ((choice (completing-read "死活题: " choices nil t)))
+    (let* ((unsolved (cl-remove-if #'etaf-go-progress-solved-p files))
+           (pool (if (or current-prefix-arg (null unsolved)) files unsolved))
+           (choices
+            (mapcar (lambda (file)
+                      (cons (format "%s%s"
+                                    (if (etaf-go-progress-solved-p file) "✓ " "  ")
+                                    (file-relative-name file directory))
+                            file))
+                    pool))
+           (prompt (format "死活题 %d/%d: " (car summary) (cdr summary)))
+           (choice (completing-read prompt choices nil t)))
       (etaf-go--open-file (cdr (assoc choice choices)) t))))
+
+;;;###autoload
+(defun etaf-go-problems-reset ()
+  "Forget which problems have been solved.
+Interactively clear every record; with a prefix argument clear only the
+problems in `etaf-go-problem-directory'."
+  (interactive "P")
+  (let* ((directory (expand-file-name etaf-go-problem-directory))
+         (files (and current-prefix-arg (file-directory-p directory)
+                     (directory-files-recursively directory "\\.sgf\\'"))))
+    (when (or (null files)
+              (y-or-n-p (format "清除 %d 道题的进度？" (length files))))
+      (etaf-go-progress-reset files)
+      (message "进度已清除"))))
 
 ;;;###autoload
 (defun etaf-go-close (&optional buffer)

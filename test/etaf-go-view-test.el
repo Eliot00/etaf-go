@@ -867,5 +867,44 @@
     (while (< (float-time) deadline)
       (accept-process-output nil 0.05))))
 
+(ert-deftest etaf-go-view-result-notation ()
+  "Area scores and resignations become SGF result values."
+  (should (equal (etaf-go--sgf-result-score (list :margin 3.5)) "B+3.5"))
+  (should (equal (etaf-go--sgf-result-score (list :margin -2.5)) "W+2.5"))
+  (should (equal (etaf-go--sgf-result-score (list :margin 0)) "0"))
+  (should (equal (etaf-go--sgf-result-resign etaf-go--black) "W+R"))
+  (should (equal (etaf-go--sgf-result-resign etaf-go--white) "B+R")))
+
+(ert-deftest etaf-go-view-pass-records-result ()
+  "Two passes write RE on the root and refresh the session description."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+    (let* ((buffer (etaf-go-play 9))
+           (runtime (etaf-runtime-for-buffer buffer))
+           (session (etaf-app-state buffer))
+           (root (etaf-go--session-root session)))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-pass)
+            (should-not (etaf-go--prop root "RE"))
+            (etaf-go-test--press runtime 'go-pass)
+            (should (equal (etaf-go--prop1 root "RE") "W+6.5"))
+            (should (string-match-p "W\\+6.5"
+                                    (etaf-go--session-info session))))
+        (etaf-go-close buffer)))))
+
+(ert-deftest etaf-go-view-resign-records-result ()
+  "Resigning writes the opponent's win as RE."
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
+            ((symbol-function 'etaf-confirm-dialog) (lambda (_) t)))
+    (let* ((buffer (etaf-go-play 9))
+           (runtime (etaf-runtime-for-buffer buffer))
+           (session (etaf-app-state buffer))
+           (root (etaf-go--session-root session)))
+      (unwind-protect
+          (progn
+            (etaf-go-test--press runtime 'go-resign)
+            (should (equal (etaf-go--prop1 root "RE") "W+R")))
+        (etaf-go-close buffer)))))
+
 (provide 'etaf-go-view-test)
 ;;; etaf-go-view-test.el ends here

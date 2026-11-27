@@ -15,6 +15,7 @@
 (require 'etaf-go-sgf)
 (require 'etaf-go-rules)
 (require 'etaf-go-gtp)
+(require 'etaf-go-progress)
 
 (defvar etaf-go-appearance)
 (defvar etaf-go-directory)
@@ -784,6 +785,30 @@ ENGINE-COLOR, when non-nil, marks the side the engine plays."
      ((< margin -0.05) (format "白胜 %.1f 目" (- margin)))
      (t "和棋"))))
 
+(defun etaf-go--sgf-result-score (score)
+  "Return SCORE as an SGF result value such as \"B+3.5\".
+SGF wants the winner letter, a plus sign and the margin; a draw is 0."
+  (let ((margin (plist-get score :margin)))
+    (cond
+     ((> margin 0.05) (format "B+%.1f" margin))
+     ((< margin -0.05) (format "W+%.1f" (- margin)))
+     (t "0"))))
+
+(defun etaf-go--sgf-result-resign (color)
+  "Return the SGF result for COLOR resigning.
+The opponent wins by resignation, which SGF writes as \"B+R\" or \"W+R\"."
+  (if (= color etaf-go--black) "W+R" "B+R"))
+
+(defun etaf-go--record-result (root result)
+  "Store RESULT, an SGF result value, on ROOT and refresh the session info.
+Only the root carries RE, as the SGF convention requires."
+  (etaf-go--set-prop root "RE" (list result)))
+
+(defun etaf-go--refresh-session-info (session)
+  "Recompute SESSION's one-line description after the tree changed."
+  (setf (etaf-go--session-info session)
+        (etaf-go--game-info (etaf-go--session-root session))))
+
 (defun etaf-go--path-moves (path size)
   "Return the moves on PATH as entries with their SGF prefixes."
   (let ((number 0)
@@ -998,9 +1023,11 @@ unmarked children are kept, which still accepts several first moves."
   "Return non-nil when NODE has no answer left in practice."
   (null (etaf-go--practice-children node)))
 
-(defun etaf-go--practice-press (path-ref hint-ref practice-color size point)
+(defun etaf-go--practice-press (path-ref hint-ref practice-color size point
+                                          &optional session)
   "Check a practice move at POINT against the current SGF node.
-Every answer for the same first move is accepted."
+Every answer for the same first move is accepted.  SESSION, when given,
+records the attempt and the solve in the progress file."
   (etaf-go--advance-transparent path-ref size)
   (let* ((path (etaf-value path-ref))
          (node (car (last path)))
@@ -1019,13 +1046,34 @@ Every answer for the same first move is accepted."
      (match
       (setf (etaf-value path-ref) (append path (list match)))
       (etaf-go--auto-reply path-ref color size)
-      (setf (etaf-value hint-ref)
-            (if (etaf-go--practice-done-p (car (last (etaf-value path-ref))))
-                "正解完成" "正解！")))
+      (let ((done (etaf-go--practice-done-p
+                   (car (last (etaf-value path-ref))))))
+        (setf (etaf-value hint-ref) (if done "正解完成" "正解！"))
+        (when (and done session)
+          (etaf-go--record-practice session))))
      (t
+      (when session
+        (etaf-go--record-practice-attempt session))
       (setf (etaf-value hint-ref)
             (format "%s 不是正解，再想想（按 m 可切到研究模式试下）"
                     (etaf-go--point-name size point)))))))
+
+(defun etaf-go--recordable-problem-p (session)
+  "Return non-nil when SESSION came from a file that can be tracked."
+  (let ((file (etaf-go--session-file session)))
+    (and (stringp file) (file-regular-p file))))
+
+(defun etaf-go--record-practice (session)
+  "Record that SESSION's problem was solved."
+  (when (etaf-go--recordable-problem-p session)
+    (ignore-errors
+      (etaf-go-progress-record (etaf-go--session-file session) 'solved))))
+
+(defun etaf-go--record-practice-attempt (session)
+  "Record that a wrong move was tried on SESSION's problem."
+  (when (etaf-go--recordable-problem-p session)
+    (ignore-errors
+      (etaf-go-progress-record (etaf-go--session-file session) 'attempts))))
 
 (defun etaf-go--study-node (color point size)
   "Return an SGF node for a study move of COLOR at POINT on a SIZE board.
@@ -1099,9 +1147,19 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
                         (etaf-go--color-name color)
                         (etaf-go--point-name size point))))))))
 
+(defun etaf-go--finish-game (game-over-ref hint-ref session root result sgf-result)
+  "Finish the game: record SGF-RESULT on ROOT and show RESULT.
+The turn line reads GAME-OVER-REF, so both the Chinese text and the SGF
+value are set together; the session description is refreshed because RE
+appears in it."
+  (etaf-go--record-result root sgf-result)
+  (etaf-go--refresh-session-info session)
+  (setf (etaf-value game-over-ref) result
+        (etaf-value hint-ref) result))
+
 (defun etaf-go--play-pass (path-ref dirty-ref hint-ref game-over-ref
                                     pass-count-ref show-score-ref
-                                    size position)
+                                    size position session)
   "Pass in a local game; two consecutive passes end it."
   (if (etaf-value game-over-ref)
       (setf (etaf-value hint-ref) "对局已经结束")
@@ -1125,13 +1183,14 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
                (score (etaf-go--score (plist-get after :board) size
                                       (etaf-go--komi root)))
                (result (etaf-go--score-result score)))
-          (setf (etaf-value game-over-ref) result
-                (etaf-value show-score-ref) t
-                (etaf-value hint-ref)
-                (format "双方停一手，对局结束：%s" result))
+          (setf (etaf-value show-score-ref) t)
+          (etaf-go--finish-game
+           game-over-ref hint-ref session root
+           (format "双方停一手，对局结束：%s" result)
+           (etaf-go--sgf-result-score score))
           (setf (etaf-value path-ref) (copy-sequence new-path)))))))
 
-(defun etaf-go--play-resign (hint-ref game-over-ref position)
+(defun etaf-go--play-resign (hint-ref game-over-ref dirty-ref session position)
   "Resign the game for the side to move."
   (if (etaf-value game-over-ref)
       (setf (etaf-value hint-ref) "对局已经结束")
@@ -1142,10 +1201,12 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
       (when (etaf-confirm-dialog
              (format "%s 认输，判定%s中盘胜？"
                      (etaf-go--color-name color) name))
-        (setf (etaf-value game-over-ref) (format "%s中盘胜" name)
-              (etaf-value hint-ref)
-              (format "%s认输，%s中盘胜"
-                      (etaf-go--color-name color) name))))))
+        (setf (etaf-value dirty-ref) t)
+        (etaf-go--finish-game
+         game-over-ref hint-ref session
+         (etaf-go--session-root session)
+         (format "%s认输，%s中盘胜" (etaf-go--color-name color) name)
+         (etaf-go--sgf-result-resign color))))))
 
 (defun etaf-go--play-undo (path-ref dirty-ref hint-ref game-over-ref
                                     pass-count-ref play-start-ref size)
@@ -1193,12 +1254,13 @@ blocks moves after the result, and PASS-COUNT-REF resets on a move."
               (etaf-value hint-ref) "重新开始")))))
 
 (defun etaf-go--pass-command (mode-ref path-ref dirty-ref hint-ref position size
-                                       game-over-ref pass-count-ref show-score-ref)
+                                       game-over-ref pass-count-ref show-score-ref
+                                       session)
   "Pass in a local game or study; explain why other modes cannot."
   (pcase (etaf-value mode-ref)
     ('play
      (etaf-go--play-pass path-ref dirty-ref hint-ref game-over-ref
-                         pass-count-ref show-score-ref size position))
+                         pass-count-ref show-score-ref size position session))
     ('study
      (let* ((state (etaf-value position))
             (color (plist-get state :to-play))
@@ -1232,7 +1294,8 @@ SESSION and SHOW-SCORE-REF let a local move hand the turn to the engine."
                                    dirty-ref hint-ref pass-count-ref
                                    show-score-ref position 0.05))))
     ('practice
-     (etaf-go--practice-press path-ref hint-ref practice-color size point))
+     (etaf-go--practice-press path-ref hint-ref practice-color size point
+                              session))
     ('study
      (etaf-go--study-play path-ref dirty-ref hint-ref position size point))
     ('edit
@@ -1522,10 +1585,11 @@ Return non-nil when a move was played."
     (cond
      ((eq point 'resign)
       (let ((winner (etaf-go--color-name (etaf-go--opponent color))))
-        (setf (etaf-value game-over-ref) (format "%s中盘胜（引擎认输）" winner)
-              (etaf-value hint-ref)
-              (format "%s认输，%s中盘胜"
-                      (etaf-go--color-name color) winner)))
+        (etaf-go--finish-game
+         game-over-ref hint-ref session
+         (etaf-go--session-root session)
+         (format "%s中盘胜（引擎认输）" winner)
+         (etaf-go--sgf-result-resign color)))
       t)
      (t
       (let* ((node (etaf-go--move-node color point size))
@@ -1551,10 +1615,11 @@ Return non-nil when a move was played."
                  (score (etaf-go--score (plist-get after :board) size
                                         (etaf-go--komi root)))
                  (result (etaf-go--score-result score)))
-            (setf (etaf-value game-over-ref) result
-                  (etaf-value show-score-ref) t
-                  (etaf-value hint-ref)
-                  (format "双方停一手，对局结束：%s" result))))
+            (setf (etaf-value show-score-ref) t)
+            (etaf-go--finish-game
+             game-over-ref hint-ref session root
+             (format "双方停一手，对局结束：%s" result)
+             (etaf-go--sgf-result-score score))))
         t)))))
 
 (defun etaf-go--engine-turn-p (session mode game-over position)
@@ -1907,11 +1972,11 @@ With PLAY non-nil start a new local game instead of an editor record."
       (list "s"
             (lambda ()
               (etaf-go--pass-command mode path dirty hint position size
-                                     game-over pass-count show-score))
+                                     game-over pass-count show-score session))
             "停一手")
       (list "R"
             (lambda ()
-              (etaf-go--play-resign hint game-over position))
+              (etaf-go--play-resign hint game-over dirty session position))
             "认输")
       (list "c"
             (lambda ()
@@ -2100,7 +2165,7 @@ With PLAY non-nil start a new local game instead of an editor record."
               :on-press
               (lambda ()
                 (etaf-go--pass-command mode path dirty hint position size
-                                       game-over pass-count show-score)))
+                                       game-over pass-count show-score session)))
             (etaf-button :label "帮助" :ref 'go-help :variant 'ghost
               :on-press #'etaf-help)
             (etaf-button :label "关闭" :ref 'go-close :variant 'ghost
@@ -2125,7 +2190,7 @@ With PLAY non-nil start a new local game instead of an editor record."
             :label "认输" :ref 'go-resign :variant 'ghost
             :on-press
             (lambda ()
-              (etaf-go--play-resign hint game-over position)))
+              (etaf-go--play-resign hint game-over dirty session position)))
           (etaf-label :if (not (string-empty-p (etaf-go--session-info session)))
             :text (truncate-string-to-width
                    (etaf-go--session-info session) 32 nil nil "…")

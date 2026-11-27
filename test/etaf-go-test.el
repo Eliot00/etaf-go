@@ -34,6 +34,7 @@
   (load (expand-file-name "etaf-go-rules-test.el" test-dir) nil t)
   (load (expand-file-name "etaf-go-sgf-test.el" test-dir) nil t)
   (load (expand-file-name "etaf-go-gtp-test.el" test-dir) nil t)
+  (load (expand-file-name "etaf-go-progress-test.el" test-dir) nil t)
   (load (expand-file-name "etaf-go-view-test.el" test-dir) nil t))
 
 (provide 'etaf-go-test)

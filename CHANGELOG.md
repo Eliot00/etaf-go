@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- A finished game records its result in the SGF `RE` property: two passes
+  write the area score (`B+3.5`, `W+2.5`, `0`) and a resignation writes
+  `B+R` / `W+R`.  The game summary refreshes immediately.
+- GTP sessions sync incrementally.  Appending a move sends one `play`
+  instead of replaying the whole game, so a long game no longer costs a
+  round trip per move on every turn; a changed board, komi or undo still
+  replays from the start.
+- Problem progress: solved problems are tracked in a plain-text
+  `etaf-go-progress-file`, `etaf-go-problems` marks solved items and offers
+  unsolved ones first (a prefix argument lists everything), and
+  `etaf-go-problems-reset` clears the record.
+
 ## 0.4.1
 
 - Declare the versions actually used: `etaf` 0.3.4 and `etaf-ui` 0.3.3.

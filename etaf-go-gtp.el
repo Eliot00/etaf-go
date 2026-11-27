@@ -24,8 +24,11 @@
 (define-error 'etaf-go-gtp-error "GTP engine error")
 
 (cl-defstruct (etaf-go-gtp (:constructor etaf-go-gtp--make))
-  "One running GTP engine."
-  process buffer name)
+  "One running GTP engine.
+SYNCED records the board the engine currently holds: a plist with :size,
+:komi and :moves, so the next position can be reached by appending moves
+instead of replaying the whole game."
+  process buffer name synced)
 
 (defvar etaf-go-gtp--sessions nil
   "Live GTP sessions, so a stray process can be cleaned up.")
@@ -144,15 +147,40 @@ TIMEOUT defaults to `etaf-go-engine-timeout'.  A `?' response signals
       (signal 'etaf-go-gtp-error
               (list (format "无法解析的 GTP 回应：%s" text)))))))
 
-(defun etaf-go-gtp-sync-position (session size komi moves)
-  "Tell SESSION the board is a SIZE square with KOMI and MOVES.
-MOVES is a list of (COLOR . VERTEX) strings, oldest first."
+(defun etaf-go-gtp--replay (session size komi moves)
+  "Reset SESSION and play MOVES on a SIZE board with KOMI."
   (etaf-go-gtp-command session (format "boardsize %d" size))
   (etaf-go-gtp-command session (format "komi %s" komi))
   (etaf-go-gtp-command session "clear_board")
   (dolist (move moves)
     (etaf-go-gtp-command session
-                         (format "play %s %s" (car move) (cdr move)))))
+                         (format "play %s %s" (car move) (cdr move))))
+  (setf (etaf-go-gtp-synced session)
+        (list :size size :komi komi :moves (copy-sequence moves))))
+
+(defun etaf-go-gtp-sync-position (session size komi moves)
+  "Tell SESSION the board is a SIZE square with KOMI and MOVES.
+MOVES is a list of (COLOR . VERTEX) strings, oldest first.  When the
+engine already holds a prefix of MOVES only the new moves are sent, which
+keeps a long game from costing one round trip per move on every turn."
+  (let* ((synced (etaf-go-gtp-synced session))
+         (known (and synced (plist-get synced :moves)))
+         (same-board (and synced
+                          (eql (plist-get synced :size) size)
+                          (equal (plist-get synced :komi) komi)))
+         (common (when same-board
+                   (cl-loop for a in known
+                            for b in moves
+                            while (equal a b)
+                            count 1))))
+    (if (and same-board (eql common (length known)))
+        (progn
+          (dolist (move (nthcdr common moves))
+            (etaf-go-gtp-command session
+                                 (format "play %s %s" (car move) (cdr move))))
+          (setf (etaf-go-gtp-synced session)
+                (list :size size :komi komi :moves (copy-sequence moves))))
+      (etaf-go-gtp--replay session size komi moves))))
 
 (defun etaf-go-gtp-genmove (session color &optional timeout)
   "Ask SESSION to generate a move for COLOR, `b' or `w'.

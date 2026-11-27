@@ -79,5 +79,33 @@
   (should (equal (etaf-go--engine-gtp-color etaf-go--black) "b"))
   (should (equal (etaf-go--engine-gtp-color etaf-go--white) "w")))
 
+(ert-deftest etaf-go-gtp-incremental-sync ()
+  "Appending moves sends only the new ones; a shorter board replays."
+  (let ((session (etaf-go-gtp-test--start)))
+    (unwind-protect
+        (progn
+          (etaf-go-gtp-sync-position session 9 6.5
+                                     '(("b" . "E5") ("w" . "C3")))
+          (should (= (length (plist-get (etaf-go-gtp-synced session) :moves)) 2))
+          ;; Adding a move keeps the recorded board in step.
+          (etaf-go-gtp-sync-position session 9 6.5
+                                     '(("b" . "E5") ("w" . "C3") ("b" . "G7")))
+          (should (= (length (plist-get (etaf-go-gtp-synced session) :moves)) 3))
+          ;; The engine kept the three moves, so the first free point is
+          ;; still A1; a reset engine would have answered the same, so the
+          ;; recorded board is checked directly.
+          (should (equal (length (plist-get (etaf-go-gtp-synced session)
+                                            :moves))
+                         3))
+          (should (equal (etaf-go-gtp-genmove session "w") "A1"))
+          ;; A divergent history replays from scratch.
+          (etaf-go-gtp-sync-position session 9 6.5 '(("b" . "D4")))
+          (should (equal (plist-get (etaf-go-gtp-synced session) :moves)
+                         '(("b" . "D4"))))
+          ;; A different komi also forces a replay.
+          (etaf-go-gtp-sync-position session 9 7.5 '(("b" . "D4")))
+          (should (equal (plist-get (etaf-go-gtp-synced session) :komi) 7.5)))
+      (etaf-go-gtp-stop session))))
+
 (provide 'etaf-go-gtp-test)
 ;;; etaf-go-gtp-test.el ends here
