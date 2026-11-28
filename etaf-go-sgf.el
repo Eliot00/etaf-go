@@ -19,8 +19,9 @@
 (cl-defstruct (etaf-go--session (:constructor etaf-go--make-session))
   "One SGF file opened by the Go board.
 ENGINE, when non-nil, is the GTP engine playing one side; ENGINE-COLOR is
-1 or 2 and ENGINE-LEVEL is the requested strength keyword."
-  file root size title info main-count mode
+1 or 2 and ENGINE-LEVEL is the requested strength keyword.  CELL-LINES is
+the session's board cell height: `auto' or an integer 1-8."
+  file root size title info main-count mode cell-lines
   engine engine-color engine-level)
 
 (defconst etaf-go--column-letters "ABCDEFGHJKLMNOPQRSTUVWXYZ"

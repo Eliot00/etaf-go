@@ -50,8 +50,9 @@
     (should (= (hash-table-count (car cache)) 2))))
 
 (ert-deftest etaf-go-view-board-metrics-uses-display-metrics ()
-  "Board metrics use the runtime's font metrics and viewport."
-  (let ((etaf-go-cell-lines 'auto))
+  "Board metrics pick a square cell from the runtime's font metrics."
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 12))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
@@ -60,25 +61,29 @@
               ((symbol-function 'etaf-viewport)
                (lambda (&optional _) (cons 1440 50))))
       (let ((cell (etaf-go--board-metrics 9)))
-        (should (= (plist-get cell :lines) 4))
-        (should (= (plist-get cell :columns) 9))
-        (should (= (plist-get cell :width) 108))
-        (should (= (plist-get cell :height) 108))
-        (should (= (plist-get cell :char-width) 12))
+        ;; Three lines are 81px tall and seven columns 84px wide; seven is
+        ;; what the row layout leaves beside the side panel.
+        (should (= (plist-get cell :lines) 3))
+        (should (= (plist-get cell :columns) 7))
+        (should (= (plist-get cell :width) 84))
+        (should (= (plist-get cell :height) 81))
         (should (plist-get cell :graphic))
-        (should (plist-get cell :compact))))))
+        (should-not (plist-get cell :compact))))))
 
 (ert-deftest etaf-go-view-cycle-cell-lines ()
   "The cell-line control cycles auto, 1, 2, 3, 4 and back."
-  (let ((ref (etaf-ref 'auto))
-        (hint (etaf-ref nil)))
+  (let* ((session (etaf-go--make-session :size 19 :cell-lines 'auto))
+         (ref (etaf-ref 'auto))
+         (hint (etaf-ref nil)))
     (dolist (expected '(1 2 3 4 auto))
-      (etaf-go--cycle-cell-lines ref hint)
-      (should (equal (etaf-value ref) expected)))))
+      (etaf-go--cycle-cell-lines ref hint session)
+      (should (equal (etaf-value ref) expected))
+      (should (equal (etaf-go--session-cell-lines session) expected)))))
 
 (ert-deftest etaf-go-view-forced-lines-are-square ()
   "Forcing two lines gives a 35x34 cell for a 7x17 font."
-  (let ((etaf-go-cell-lines 2))
+  (let ((etaf-go-cell-lines 2)
+        (etaf-go--layout-char-width 7))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
@@ -90,7 +95,13 @@
         (should (= (plist-get cell :lines) 2))
         (should (= (plist-get cell :columns) 5))
         (should (= (plist-get cell :width) 35))
-        (should (= (plist-get cell :height) 34))))))
+        (should (= (plist-get cell :height) 34))
+        (should-not (plist-get cell :compact)))
+      ;; A 735px board no longer fits beside the panel in a 900px window,
+      ;; so the panel moves below instead of clipping the board.
+      (cl-letf (((symbol-function 'etaf-viewport)
+                 (lambda (&optional _) (cons 900 34))))
+        (should (plist-get (etaf-go--board-metrics 19) :compact))))))
 
 (ert-deftest etaf-go-view-cell-aspect-selection ()
   "Cell selection takes the largest near-square cell that fits."
@@ -113,8 +124,9 @@
     (should (= (plist-get cell :columns) 2))))
 
 (ert-deftest etaf-go-view-19x19-metrics-use-height ()
-  "A 19x19 board takes multiple text lines per cell in a normal window."
-  (let ((etaf-go-cell-lines 'auto))
+  "A 19x19 board picks a square cell from the window height."
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 9))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
@@ -125,12 +137,84 @@
       (let ((cell (etaf-go--board-metrics 19)))
         (should (= (plist-get cell :lines) 2))
         (should (= (plist-get cell :columns) 4))
+        (should (= (plist-get cell :width) 36))
         (should (= (plist-get cell :height) 40))
         (should-not (plist-get cell :compact))))))
 
+(ert-deftest etaf-go-view-cells-are-square ()
+  "Every fitted cell fits its window and stays close to square."
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 7))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'etaf-display-metrics)
+               (lambda (&optional _)
+                 '(:char-width 7 :line-height 17 :ascent 80))))
+      (dolist (viewport '((1085 . 34) (1085 . 45) (1600 . 60) (800 . 40)))
+        (cl-letf (((symbol-function 'etaf-viewport)
+                   (lambda (&optional _) viewport)))
+          (dolist (size '(9 13 19))
+            (let* ((cell (etaf-go--board-metrics size))
+                   (ratio (/ (float (min (plist-get cell :width)
+                                         (plist-get cell :height)))
+                             (max (plist-get cell :width)
+                                  (plist-get cell :height))))
+                   (grid (+ 2 size))
+                   (board-width (* grid (plist-get cell :width)))
+                   (board-height (* grid (plist-get cell :height))))
+              (should (>= ratio 0.8))
+              (should (<= board-width (- (car viewport) 28 252)))
+              (should (<= board-height (- (* (cdr viewport) 17) 51))))))))))
+
+(ert-deftest etaf-go-view-cell-fit-respects-budgets ()
+  "A fitted cell never exceeds the pixels it was offered."
+  (let* ((view (etaf-go--region-full 19))
+         (metrics '(:char-width 7 :line-height 17 :ascent 80))
+         (shape (etaf-go--cell-fit view metrics 8 500 500)))
+    (should shape)
+    (let ((dims (etaf-go--board-dims view metrics (car shape) (cadr shape))))
+      (should (<= (car dims) 500))
+      (should (<= (cadr dims) 500))))
+  (should-not (etaf-go--cell-fit (etaf-go--region-full 19)
+                                 '(:char-width 7 :line-height 17)
+                                 8 10 10)))
+
+(ert-deftest etaf-go-view-choose-scale-keeps-a-readable-face ()
+  "A smaller face is used only when it buys a clearly larger board."
+  (let* ((view (etaf-go--region-full 19))
+         (same-board
+          (list (cons 1.0 '(:char-width 10 :line-height 20 :ascent 80))
+                (cons 0.5 '(:char-width 5 :line-height 10 :ascent 80))))
+         (crossing
+          (list (cons 1.0 '(:char-width 7 :line-height 17 :ascent 80))
+                (cons 0.8 '(:char-width 6 :line-height 14 :ascent 80)))))
+    ;; Both faces draw a 420px board, so the unscaled face keeps the text
+    ;; readable.
+    (should (equal (etaf-go--choose-scale view same-board 8 500 500 0)
+                   '(1.0 1 2)))
+    ;; Two 14px lines fit where two 17px lines do not: the board grows by
+    ;; more than a tenth, so the 0.8 face wins.
+    (should (equal (etaf-go--choose-scale view crossing 8 1085 630 36)
+                   '(0.8 2 5)))))
+
+(ert-deftest etaf-go-view-choose-scale-for-local-view ()
+  "A local problem grid can keep the full-size face."
+  (let* ((options
+          (list (cons 1.0 '(:char-width 7 :line-height 17 :ascent 80))
+                (cons 0.7 '(:char-width 5 :line-height 11 :ascent 80))))
+         (full (etaf-go--choose-scale (etaf-go--region-full 19)
+                                      options 8 1085 700 36))
+         (local (etaf-go--choose-scale '(2 3 7 6)
+                                       options 8 1085 700 36)))
+    ;; The 21-cell board needs two 11px lines to fill the height, while the
+    ;; 9-cell problem fits four 17px lines and keeps the normal font.
+    (should (equal full '(0.7 2 4)))
+    (should (equal local '(1.0 4 10)))))
+
 (ert-deftest etaf-go-view-short-window-uses-two-lines ()
-  "A 45-line window still gives the board two text lines per cell."
-  (let ((etaf-go-cell-lines 'auto))
+  "A 45-line window gives a 19x19 board two-line cells."
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 7))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
@@ -145,19 +229,26 @@
         (should (= (plist-get cell :height) 28))))))
 
 (ert-deftest etaf-go-view-narrow-window-stacks-panel ()
-  "When the side panel would shrink the board, the board keeps its size."
-  (let ((etaf-go-cell-lines 'auto))
+  "A narrow window stacks the panel instead of shrinking the board."
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 9))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
                (lambda (&optional _)
-                 '(:char-width 9 :line-height 20 :ascent 80)))
-              ((symbol-function 'etaf-viewport)
-               (lambda (&optional _) (cons 1000 50))))
-      (let ((cell (etaf-go--board-metrics 19)))
-        (should (= (plist-get cell :lines) 2))
-        (should (= (plist-get cell :columns) 4))
-        (should (plist-get cell :compact))))))
+                 '(:char-width 9 :line-height 20 :ascent 80))))
+      (cl-letf (((symbol-function 'etaf-viewport)
+                 (lambda (&optional _) (cons 700 50))))
+        (let ((cell (etaf-go--board-metrics 19)))
+          (should (= (plist-get cell :lines) 1))
+          (should (= (plist-get cell :columns) 2))
+          (should (= (plist-get cell :width) 18))
+          (should (= (plist-get cell :height) 20))
+          (should (plist-get cell :compact))))
+      ;; At a full 86 columns the panel still fits beside the board.
+      (cl-letf (((symbol-function 'etaf-viewport)
+                 (lambda (&optional _) (cons 1000 50))))
+        (should-not (plist-get (etaf-go--board-metrics 19) :compact))))))
 
 (ert-deftest etaf-go-view-svg-resolves-palette-handle ()
   "A reactive palette handle still paints the board instead of black."
@@ -747,7 +838,8 @@
 
 (ert-deftest etaf-go-view-metrics-magnify-local-view ()
   "A local view gets larger cells than the full board."
-  (let ((etaf-go-cell-lines 'auto))
+  (let ((etaf-go-cell-lines 'auto)
+        (etaf-go--layout-char-width 7))
     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
               ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
               ((symbol-function 'etaf-display-metrics)
@@ -757,11 +849,11 @@
                (lambda (&optional _) (cons 1085 34))))
       (let ((local (etaf-go--board-metrics 19 '(2 3 7 6)))
             (full (etaf-go--board-metrics 19)))
+        ;; A 9-cell grid fits three lines where the 21-cell grid fits one.
         (should (= (plist-get local :lines) 3))
         (should (= (plist-get local :columns) 7))
         (should (= (plist-get local :width) 49))
         (should (= (plist-get local :height) 51))
-        (should (= (plist-get full :lines) 1))
         (should (> (plist-get local :width) (plist-get full :width)))))))
 
 (ert-deftest etaf-go-view-toggle-zoom ()

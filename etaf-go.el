@@ -1,6 +1,6 @@
 ;;; etaf-go.el --- Go play, records and life-and-death on ETAF -*- lexical-binding: t -*-
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Version: 0.5.0
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.4") (etaf-ui "0.3.3"))
 ;; Keywords: games
 ;; URL: https://github.com/Eliot00/etaf-go
@@ -67,6 +67,7 @@
 ;; N new, o open, F1 help and q close.
 
 ;;; Code:
+(require 'face-remap)
 (require 'etaf)
 (require 'etaf-ui)
 
@@ -78,6 +79,8 @@
 
 (declare-function etaf-go--engine-close "etaf-go-view" (session))
 (declare-function etaf-go--home-open "etaf-go-view" ())
+(declare-function ebox-viewport-window-width "ebox-buffer" (window))
+(declare-function ebox-buffer-mount "ebox-buffer" (buffer-or-name))
 (declare-function etaf-go-gtp-start "etaf-go-gtp"
                   (program &optional arguments))
 (declare-function etaf-go-gtp-stop "etaf-go-gtp" (session))
@@ -158,17 +161,99 @@ board bigger but may require scrolling."
         (setq text (substring text 1)))
       text)))
 
+(defvar-local etaf-go--applied-scale 1.0
+  "Face scale currently applied to the board buffer, or 1.0.")
+
+(defvar-local etaf-go--scale-cookie nil
+  "Cookie of the board's relative default-face remap, or nil.")
+
+(defun etaf-go--notify-scale-change ()
+  "Ask Ebox to re-measure after the board's face scale changed.
+Ebox treats `text-scale-mode-hook' as the signal that a mounted buffer's
+glyph metrics changed: it clears its pixel caches, lays the tree out again
+and refits the application.  An unmounted buffer needs no notification
+because it measures the new face when it mounts."
+  (when (and (fboundp 'ebox-buffer-mount)
+             (ebox-buffer-mount (current-buffer)))
+    (run-hooks 'text-scale-mode-hook)))
+
+(defun etaf-go--apply-scale (scale)
+  "Apply SCALE to the board buffer's default face.
+Ebox only allows whole-line cell heights, so a 21-cell board in a short
+window needs a shorter line before it can use two lines per cell.  The
+remap is relative, so it composes with the application's canvas colours
+and the user's own text scale.  A nil or 1.0 SCALE removes it."
+  (let* ((scale (or scale 1.0))
+         (current (if etaf-go--scale-cookie etaf-go--applied-scale 1.0)))
+    (unless (= scale current)
+      (when etaf-go--scale-cookie
+        (face-remap-remove-relative etaf-go--scale-cookie)
+        (setq etaf-go--scale-cookie nil))
+      (setq etaf-go--applied-scale scale)
+      (unless (= scale 1.0)
+        (setq etaf-go--scale-cookie
+              (face-remap-add-relative 'default :height scale)))
+      (etaf-go--notify-scale-change))))
+
+(defun etaf-go--board-scale-for (size &optional window cell-lines view)
+  "Choose the board face scale for SIZE in WINDOW.
+CELL-LINES is the session's `etaf-go-cell-lines' value; an integer pins
+the cell height and leaves the face unscaled, because a forced cell may
+scroll.  VIEW is the region the board shows; a local problem has a smaller
+grid and can afford a larger face.  Return 1.0 on a text frame or when no
+measured scale fits."
+  (if (and (display-graphic-p) (image-type-available-p 'svg))
+      (if (integerp cell-lines)
+          1.0
+        (let* ((window (or window (get-buffer-window (current-buffer) t)
+                           (selected-window)))
+               (width (if (window-live-p window)
+                          (ebox-viewport-window-width window)
+                        1080))
+               (height (if (window-live-p window)
+                           (window-body-height window t)
+                         760))
+               (view (or view (etaf-go--region-full size)))
+               (options (etaf-go--scale-options))
+               (choice (etaf-go--choose-scale
+                        view options 8 width height
+                        (if (etaf-go--row-layout-p width)
+                            etaf-go--sidebar-columns
+                          0))))
+          (or (car choice) 1.0)))
+    1.0))
+
 (defun etaf-go--display (session name)
-  "Display SESSION as the application buffer NAME and return the buffer."
+  "Display SESSION as the application buffer NAME and return the buffer.
+The board buffer's default face is scaled before the view measures it, so
+Ebox sees the chosen line height; the fit callback re-scales after each
+window change, which keeps a resized frame fitting."
+  (unless (etaf-go--session-cell-lines session)
+    (setf (etaf-go--session-cell-lines session) etaf-go-cell-lines))
   (etaf-app-open name
                  (etaf-view (etaf-go--app :session session))
                  :state session
                  :cursor nil
                  ;; ETAF lays the canvas out at the font's line height.  A
-                 ;; global `line-spacing' adds a pixel gap between the board's
-                 ;; image rows, so keep the application buffer at nil.
-                 :on-fit (lambda (_window)
-                           (setq-local line-spacing nil))
+                 ;; global `line-spacing' adds a pixel gap between the
+                 ;; board's image rows, so keep it at nil.
+                 :on-fit (lambda (window)
+                           (setq-local line-spacing nil)
+                           (let ((size (etaf-go--session-size session)))
+                             (etaf-go--apply-scale
+                              (etaf-go--board-scale-for
+                               size window
+                               (etaf-go--session-cell-lines session)
+                               ;; Before the first render the region is
+                               ;; not known; a session opened directly in
+                               ;; practice starts at its root.
+                               (or etaf-go--region
+                                   (if (eq (etaf-go--session-mode session)
+                                           'practice)
+                                       (etaf-go--problem-region
+                                        (list (etaf-go--session-root session))
+                                        size)
+                                     (etaf-go--region-full size)))))))
                  :on-close (lambda () nil))
   (get-buffer name))
 

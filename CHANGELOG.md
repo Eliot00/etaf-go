@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0
+
+- The graphical board measures the default face at several scales and keeps
+  the largest one whose board is within a tenth of the best fit.  A short
+  window can now use two-line cells instead of collapsing the 19x19 board to
+  one line per cell; the trade is a smaller font for the whole application
+  buffer, so a scale is accepted only when it buys clearly more board.  The
+  scale is measured again after every window change and composed with the
+  application's canvas colours and the user's own text scale.  A very short
+  frame now gives almost all of its height to the board, so the button rows
+  below it can fall outside the window; the keyboard shortcuts still work.
+- The row layout reserves the panel's actual 36 columns (34 plus the gap)
+  instead of 42, so wide frames can give a 9x9 board its third text line.
+- `L` remembers the forced cell height on the session.  Forcing a height
+  removes the automatic scale and leaves the normal font; `auto` restores
+  the measured fit.  A forced board that no longer fits beside the panel
+  moves it below so the full width is available.
+- Cell fitting now also respects the window's pixel height, so a fitted
+  board never claims a cell taller than the frame.
+
 ## 0.5.0
 
 - A finished game records its result in the SGF `RE` property: two passes

@@ -20,6 +20,8 @@
 (defvar etaf-go-appearance)
 (defvar etaf-go-directory)
 (defvar etaf-go-cell-lines)
+(defvar etaf-go--applied-scale)
+(defvar etaf-go--scale-cookie)
 (defvar etaf-go-engine-program)
 (defvar etaf-go-engine-arguments)
 (defvar etaf-go-engine-handicap)
@@ -32,6 +34,10 @@
 (declare-function etaf-go-open-file "etaf-go" (&optional file practice))
 (declare-function etaf-go-problems "etaf-go" ())
 (declare-function etaf-go-close "etaf-go" (&optional buffer))
+(declare-function etaf-go--apply-scale "etaf-go" (scale))
+(declare-function etaf-go--notify-scale-change "etaf-go" ())
+(declare-function ebox-display-metrics "ebox-measure" (&optional buffer-or-name))
+(declare-function ebox-buffer-mount "ebox-buffer" (buffer-or-name))
 
 (defconst etaf-go--light-theme
   '(:ui-bg "#F2EEE5" :ui-fg "#2A2A27" :ui-muted-fg "#7A7468"
@@ -99,59 +105,223 @@ larger, so return the most lines whose rounded columns still fit."
 (defconst etaf-go--row-layout-columns 86
   "Minimum window width in character columns for a side-by-side layout.")
 
+(defconst etaf-go--font-scales '(1.0 0.9 0.8 0.75 0.7 0.65 0.6 0.55 0.5)
+  "Face scales tried when fitting a board.
+Ebox lays a board row out as whole text lines, so a 21-cell board in a
+short window needs shorter lines before it can use two lines per cell.
+Every scale is measured in the buffer; Emacs resolves a face height to a
+font size, so its line height is not a plain multiple of the base one.")
+
+(defconst etaf-go--sidebar-columns 36
+  "Character columns kept for the side panel and its gap.
+The panel itself is 34 columns wide; two more separate it from the board.
+The application padding is counted separately.")
+
+(defconst etaf-go--horizontal-padding 4
+  "Character columns the application padding takes from the canvas.")
+
+(defconst etaf-go--vertical-reserve 3
+  "Text lines kept for the application padding and the title row.")
+
+(defconst etaf-go--scale-slack 0.9
+  "Smallest board, relative to the best fit, that keeps a larger face.
+A smaller face shrinks every label in the application, so it is used only
+when it draws a board at least a tenth larger than the best larger one.")
+
+(defun etaf-go--board-dims (view metrics lines columns)
+  "Return (WIDTH HEIGHT) pixels of a board drawn with LINES and COLUMNS.
+VIEW fixes the board grid and METRICS the cell's character size."
+  (let ((grid (+ 2 (max (etaf-go--region-height view)
+                        (etaf-go--region-width view)))))
+    (list (* grid columns (max 1 (plist-get metrics :char-width)))
+          (* grid lines (max 1 (plist-get metrics :line-height))))))
+
 (defun etaf-go--board-width-ch (metrics view)
   "Return the board width in character cells for METRICS and VIEW."
   (* (+ 2 (etaf-go--region-width view))
      (or (plist-get metrics :columns) 1)))
 
+(defun etaf-go--cell-fit (view metrics max-lines width height)
+  "Return (LINES COLUMNS) for the largest near-square cell that fits.
+METRICS gives the character width and line height in pixels; VIEW fixes
+the board grid.  WIDTH and HEIGHT are the pixels the board may use.
+Ebox only allows whole-line cells, so the cell is COLUMNS character widths
+wide and LINES line heights tall.  Take the roundest cell that fits and,
+between cells of equal size, the one whose board is less elongated."
+  (let* ((grid (+ 2 (max (etaf-go--region-height view)
+                        (etaf-go--region-width view))))
+         (char-width (max 1 (plist-get metrics :char-width)))
+         (line-height (max 1 (plist-get metrics :line-height)))
+         (limit (max 1 (min max-lines
+                            (floor (/ height (float (* grid line-height)))))))
+         (best nil))
+    (dotimes (index limit)
+      (let* ((lines (1+ index))
+             (columns (max 1 (round (/ (* lines line-height)
+                                       (float char-width)))))
+             (board-width (* grid columns char-width))
+             (board-height (* grid lines line-height))
+             (short (min board-width board-height))
+             (aspect (/ (float short)
+                        (max board-width board-height))))
+        (when (and (<= board-width width)
+                   (<= board-height height)
+                   (or (null best)
+                       (> short (car best))
+                       (and (= short (car best))
+                            (> aspect (nth 1 best)))))
+          (setq best (list short aspect lines columns)))))
+    (and best (cddr best))))
+
+(defun etaf-go--choose-scale (view options max-lines width height sidebar-columns)
+  "Choose the largest font scale that still draws a near-best board.
+OPTIONS is an alist of (SCALE . METRICS), one entry per face scale; VIEW
+fixes the board grid and WIDTH and HEIGHT are the window's pixels.
+SIDEBAR-COLUMNS is the width the side panel keeps in a row layout; the
+application padding is added on top of it.
+
+Return (SCALE LINES COLUMNS), or nil when no option fits.  A larger face
+wins unless a smaller one draws a board at least
+`etaf-go--scale-slack' as large as the best, because shrinking the face
+also shrinks every other label in the buffer."
+  (let ((best 0) candidates)
+    (dolist (option options)
+      (let* ((scale (car option))
+             (metrics (cdr option))
+             (char-width (max 1 (plist-get metrics :char-width)))
+             (line-height (max 1 (plist-get metrics :line-height)))
+             (shape (etaf-go--cell-fit
+                     view metrics max-lines
+                     (max 1 (- width
+                               (* etaf-go--horizontal-padding char-width)
+                               (* sidebar-columns char-width)))
+                     (max 1 (- height
+                               (* etaf-go--vertical-reserve line-height))))))
+        (when shape
+          (let* ((dims (etaf-go--board-dims view metrics
+                                            (car shape) (cadr shape)))
+                 (short (min (car dims) (cadr dims))))
+            (push (list scale (car shape) (cadr shape) short) candidates)
+            (setq best (max best short))))))
+    (when candidates
+      (let* ((limit (* etaf-go--scale-slack best))
+             (kept (cl-remove-if (lambda (candidate)
+                                   (< (nth 3 candidate) limit))
+                                 candidates))
+             (pick (car (sort kept
+                              (lambda (a b)
+                                (if (= (car a) (car b))
+                                    (> (nth 3 a) (nth 3 b))
+                                  (> (car a) (car b))))))))
+        (list (car pick) (nth 1 pick) (nth 2 pick))))))
+
+(defun etaf-go--measure-metrics ()
+  "Return the current buffer's Ebox metrics, or a frame fallback.
+The fallback serves callers before the runtime mounts."
+  (or (ignore-errors (ebox-display-metrics (current-buffer)))
+      (list :char-width (max 1 (frame-char-width))
+            :line-height (max 1 (frame-char-height))
+            :ascent 100)))
+
+(defun etaf-go--scale-options ()
+  "Return an alist mapping each candidate font scale to measured metrics.
+The board's own remap is removed for the measurement and restored
+afterwards; the application's canvas and the user's text scale stay in
+effect.  Every scale is measured in the buffer because Emacs resolves a
+face height to a font size, so the line height is not a plain multiple of
+the base one."
+  (let ((cookie etaf-go--scale-cookie))
+    (unwind-protect
+        (progn
+          (when cookie
+            (face-remap-remove-relative cookie)
+            (setq etaf-go--scale-cookie nil))
+          (let ((base (etaf-go--measure-metrics)))
+            (mapcar
+             (lambda (scale)
+               (if (= scale 1.0)
+                   (cons scale base)
+                 (let ((probe (face-remap-add-relative
+                               'default :height scale)))
+                   (unwind-protect
+                       (cons scale (etaf-go--measure-metrics))
+                     (face-remap-remove-relative probe)))))
+             etaf-go--font-scales)))
+      (when cookie
+        (setq etaf-go--scale-cookie
+              (face-remap-add-relative 'default :height etaf-go--applied-scale))))))
+
+(defvar etaf-go--layout-char-width nil
+  "Character width in pixels that decides the row layout, or nil.
+The frame's own width is used unless a test binds this.")
+
+(defvar-local etaf-go--region nil
+  "Region the mounted board shows, or nil before its first render.
+The scale fit reads it so a zoomed problem can use a larger face.")
+
+(defun etaf-go--row-layout-p (width)
+  "Return non-nil when WIDTH pixels leave room for the side panel.
+The decision uses the frame's own character width, not the possibly
+scaled board face, so resizing the face never flips the layout."
+  (>= (floor width (max 1 (or etaf-go--layout-char-width
+                              (frame-char-width))))
+      etaf-go--row-layout-columns))
+
 (defun etaf-go--board-metrics (size &optional view)
-  "Choose the largest near-square cell for a SIZE board.
-The board takes the window height left after the controls and the
-width left after the side panel, so it grows with the frame instead of
-staying at the smallest square cell.  VIEW limits the board to a local
-region, so its cells can be larger."
-  (if (and (display-graphic-p) (image-type-available-p 'svg))
-      (let* ((display (etaf-display-metrics))
-             (char-width (max 1 (plist-get display :char-width)))
-             (line-height (max 1 (plist-get display :line-height)))
+  "Choose the cell shape for a SIZE board that draws the largest square.
+VIEW limits the board to a local region, so its cells can be larger.
+A graphical frame measures the buffer's current face, so the previous fit
+chose the scale; a text frame uses whole lines."
+  (let ((view (or view (etaf-go--region-full size))))
+    (cond
+     ((and (display-graphic-p) (image-type-available-p 'svg))
+      (let* ((metrics (etaf-display-metrics))
+             (char-width (max 1 (plist-get metrics :char-width)))
+             (line-height (max 1 (plist-get metrics :line-height)))
              (viewport (etaf-viewport))
-             (window-rows (or (cdr viewport) 40))
-             (window-columns (floor (or (car viewport)
-                                        (* 80 char-width))
-                                    char-width))
-             (view (or view (etaf-go--region-full size)))
+             (width (or (car viewport) (* 80 char-width)))
+             (height (* (or (cdr viewport) 40) line-height))
+             (row-layout (etaf-go--row-layout-p width))
+             (forced (bound-and-true-p etaf-go-cell-lines))
              (grid (+ 2 (max (etaf-go--region-height view)
                              (etaf-go--region-width view))))
-             (forced (bound-and-true-p etaf-go-cell-lines))
-             (max-lines
-              (if (integerp forced)
-                  (max 1 (min 8 forced))
-                ;; Keep the title row and a little padding visible; the
-                ;; controls below the board may scroll rather than force a
-                ;; tiny one-line cell.
-                (max 1 (floor (max 0 (- window-rows 2)) grid))))
-             (row-columns
-              (if (integerp forced)
-                  30
-                (max 1 (floor (max 0 (- window-columns 42)) grid))))
-             (stack-columns
-              (if (integerp forced)
-                  30
-                (max 1 (floor (max 0 (- window-columns 4)) grid))))
-             (row-cell (etaf-go--best-cell char-width line-height
-                                           max-lines row-columns))
-             (stack-cell (etaf-go--best-cell char-width line-height
-                                             max-lines stack-columns))
-             (stacked (or (> (plist-get stack-cell :lines)
-                             (plist-get row-cell :lines))
-                          (and (= (plist-get stack-cell :lines)
-                                  (plist-get row-cell :lines))
-                               (> (plist-get stack-cell :columns)
-                                  (plist-get row-cell :columns)))))
-             (cell (if stacked stack-cell row-cell)))
-        (append cell
-                (list :char-width char-width :graphic t :compact stacked)))
-    '(:columns 2 :lines 1 :width 40 :height 40 :char-width 1 :graphic nil)))
+             (padding (* etaf-go--horizontal-padding char-width))
+             (sidebar (* etaf-go--sidebar-columns char-width)))
+        (if (integerp forced)
+            ;; A forced height does not shrink to the window; a board that
+            ;; no longer fits beside the panel moves it below so the full
+            ;; width is available.
+            (let* ((lines (max 1 (min 8 forced)))
+                   (columns (max 1 (round (/ (* lines line-height)
+                                             (float char-width)))))
+                   (board-width (* grid columns char-width)))
+              (list :columns columns :lines lines
+                    :width (* columns char-width)
+                    :height (* lines line-height)
+                    :char-width char-width :graphic t
+                    :compact (and (> board-width (- width padding sidebar))
+                                  (<= board-width (- width padding)))))
+          (let ((shape (etaf-go--cell-fit
+                        view metrics 8
+                        (max 1 (- width padding
+                                  (if row-layout sidebar 0)))
+                        (max 1 (- height
+                                  (* etaf-go--vertical-reserve
+                                     line-height))))))
+            (if shape
+                (list :columns (cadr shape) :lines (car shape)
+                      :width (* (cadr shape) char-width)
+                      :height (* (car shape) line-height)
+                      :char-width char-width :graphic t
+                      :compact (not row-layout))
+              ;; Not even one line fits: keep the smallest cell and let the
+              ;; window scroll rather than divide the board away.
+              (list :columns 1 :lines 1 :width char-width
+                    :height line-height :char-width char-width
+                    :graphic t :compact (not row-layout)))))))
+     (t
+      '(:columns 2 :lines 1 :width 40 :height 40 :char-width 1
+        :graphic nil)))))
 
 (defun etaf-go--star-points (size)
   "Return the star points of a SIZE board as (ROW . COLUMN) pairs."
@@ -1375,7 +1545,10 @@ Entering practice turns on its local view; `z' toggles it."
           (pcase next
             ('practice "死活练习：找出 SGF 的正解；n 提示，r 重来")
             ('study "自由研究：点击棋盘落子即写入棋谱分支；u 撤销，s 停一手")
-            (_ "打谱模式：n/p 前后翻页，v 选择变化")))))
+            (_ "打谱模式：n/p 前后翻页，v 选择变化")))
+    ;; Practice may zoom into a smaller grid, which can afford a larger
+    ;; face; replay and study use the whole board.
+    (etaf-go--notify-scale-change)))
 
 (defun etaf-go--open-variations (mode-ref variations-open-ref variations hint-ref)
   "Open the variation chooser unless practice would reveal the answer."
@@ -1522,7 +1695,8 @@ Entering practice turns on its local view; `z' toggles it."
                   (format "局部放大 %d×%d"
                           (etaf-go--region-width region)
                           (etaf-go--region-height region)))))
-      (setf (etaf-value hint-ref) "显示全盘")))))
+      (setf (etaf-value hint-ref) "显示全盘"))
+    (etaf-go--notify-scale-change))))
 
 (defun etaf-go--engine-gtp-color (color)
   "Return COLOR as the GTP colour word."
@@ -1680,15 +1854,25 @@ application refs freely and update the SGF tree."
   (setf (etaf-value appearance-ref)
         (if (eq (etaf-value appearance-ref) 'dark) 'light 'dark)))
 
-(defun etaf-go--cycle-cell-lines (cell-lines-ref hint-ref)
-  "Cycle the graphical cell height through auto, 1, 2, 3 and 4 lines."
+(defun etaf-go--cycle-cell-lines (cell-lines-ref hint-ref &optional session)
+  "Cycle the graphical cell height through auto, 1, 2, 3 and 4 lines.
+SESSION, when given, remembers the choice and drops the fitted face scale:
+a forced line height means the caller accepts scrolling for a larger cell,
+so the automatic scale must not quietly shrink it."
   (let* ((values '(auto 1 2 3 4))
          (next (or (cadr (memq (etaf-value cell-lines-ref) values)) 'auto)))
     (setf (etaf-value cell-lines-ref) next
           (etaf-value hint-ref)
           (if (eq next 'auto)
               "棋盘 cell 行数：自动"
-            (format "棋盘 cell 行数：%d（窗口不够高时会滚动）" next)))))
+            (format "棋盘 cell 行数：%d（窗口不够高时会滚动）" next)))
+    (when session
+      (setf (etaf-go--session-cell-lines session) next)
+      (when (integerp next)
+        (etaf-go--apply-scale 1.0))
+      ;; Switching to auto keeps the scale at 1.0, so ask the fit callback
+      ;; to choose a scale for the current window.
+      (etaf-go--notify-scale-change))))
 
 (defun etaf-go--load (mode-ref dirty-ref)
   "Read another SGF file in a new buffer and close this one."
@@ -1745,7 +1929,8 @@ With PLAY non-nil start a new local game instead of an editor record."
      :test #'equal))
    (root (etaf-go--session-root session))
    (size (etaf-go--session-size session))
-   (cell-lines (etaf-ref etaf-go-cell-lines))
+   (cell-lines (etaf-ref (or (etaf-go--session-cell-lines session)
+                             etaf-go-cell-lines)))
    (path (etaf-ref (list root)))
    (mode (etaf-ref (etaf-go--session-mode session)))
    (practice-start (etaf-ref (list root)))
@@ -1753,11 +1938,16 @@ With PLAY non-nil start a new local game instead of an editor record."
    (region
     (etaf-computed
      (lambda ()
-       (if (and (etaf-value zoom)
-                (eq (etaf-value mode) 'practice)
-                (display-graphic-p))
-           (etaf-go--problem-region (etaf-value practice-start) size)
-         (etaf-go--region-full size)))
+       (let ((region
+              (if (and (etaf-value zoom)
+                       (eq (etaf-value mode) 'practice)
+                       (display-graphic-p))
+                  (etaf-go--problem-region (etaf-value practice-start) size)
+                (etaf-go--region-full size))))
+         ;; The fit callback runs outside the component; remember the board
+         ;; actually drawn so a local view can be scaled for its own grid.
+         (setq-local etaf-go--region region)
+         region))
      :test #'equal))
    (metrics
     (etaf-computed
@@ -1842,15 +2032,15 @@ With PLAY non-nil start a new local game instead of an editor record."
     (etaf-computed
      (lambda ()
        (let ((metrics (etaf-value metrics)))
-         (or (plist-get metrics :compact)
-             (let* ((width (car (etaf-value viewport)))
-                    (char-width (or (plist-get metrics :char-width)
-                                    (frame-char-width)))
-                    (limit (if (plist-get metrics :graphic)
-                               etaf-go--row-layout-columns
-                             78)))
-               (and width
-                    (< (floor width (max 1 char-width)) limit))))))
+         (if (plist-member metrics :compact)
+             (plist-get metrics :compact)
+           ;; A text frame has no measured cell, so stack the panel on a
+           ;; narrow window from the viewport's character columns.
+           (let* ((width (car (etaf-value viewport)))
+                  (char-width (or (plist-get metrics :char-width)
+                                  (frame-char-width))))
+             (and width
+                  (< (floor width (max 1 char-width)) 78))))))
      :test #'eq)))
   :setup
   (progn
@@ -1960,7 +2150,7 @@ With PLAY non-nil start a new local game instead of an editor record."
                 (setf (etaf-value hint) "P 只在编辑模式切换行棋方")))
             "行棋方")
       (list "L"
-            (lambda () (etaf-go--cycle-cell-lines cell-lines hint))
+            (lambda () (etaf-go--cycle-cell-lines cell-lines hint session))
             "棋盘 cell 行数")
       (list "z"
             (lambda ()
@@ -2216,7 +2406,7 @@ With PLAY non-nil start a new local game instead of an editor record."
             :ref 'go-cell-lines :variant 'ghost
             :help-echo "循环切换棋盘 cell 行数（auto/1/2/3/4）"
             :on-press
-            (lambda () (etaf-go--cycle-cell-lines cell-lines hint)))
+            (lambda () (etaf-go--cycle-cell-lines cell-lines hint session)))
           (etaf-label :if (and (eq (etaf-value mode) 'practice)
                                (not (equal (etaf-value region)
                                            (etaf-go--region-full size))))
